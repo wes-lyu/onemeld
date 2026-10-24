@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+from typing import Annotated, ClassVar, Literal
+
 import pytest
+from pydantic import Field
 
 from sglang_omni.config import (
     EngineArgs,
@@ -11,6 +14,13 @@ from sglang_omni.config import (
     PlacementConfig,
     StageConfig,
 )
+from sglang_omni.config.runtime import (
+    apply_typed_stage_kwargs,
+    resolve_stage_factory_kwargs,
+    resolve_stage_typed_kwargs,
+)
+from sglang_omni.config.schema import FactoryDefault
+from tests.unit_test.fixtures.pipeline_fakes import dummy_factory
 
 FACTORY = "tests.unit_test.fixtures.pipeline_fakes.dummy_factory"
 
@@ -175,3 +185,111 @@ def test_engine_kv_cache_bytes_rejects_max_total_tokens() -> None:
 
     with pytest.raises(ValueError, match="cannot be set together"):
         EngineArgs(kv_cache_bytes="2GiB", max_total_tokens=4096)
+
+
+class DecodeFactoryArgs(FactoryArgs):
+    dtype: Annotated[str | None, FactoryDefault(value="bfloat16")] = None
+    enable_async_decode: Annotated[bool | None, FactoryDefault(value=False)] = None
+    max_batch_wait_ms: Annotated[float | None, FactoryDefault(value=10.0)] = None
+
+
+class DecodeStageConfig(StageConfig):
+    factory: DecodeFactoryArgs = Field(default_factory=DecodeFactoryArgs)
+
+
+class DecodePipelineConfig(PipelineConfig):
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "decode": DecodeStageConfig,
+    }
+
+    def stage_factory_kwargs(self, stage_name: str) -> dict[str, str | float | bool]:
+        assert stage_name == "decode"
+        return {
+            "dtype": "float16",
+            "enable_async_decode": True,
+            "max_batch_wait_ms": 5.0,
+        }
+
+
+@pytest.mark.parametrize("round_trip", [False, True])
+@pytest.mark.parametrize("replica", [False, True])
+@pytest.mark.parametrize("selection", ["omitted", "none", "explicit"])
+def test_factory_override_precedence(
+    selection: Literal["omitted", "none", "explicit"],
+    replica: bool,
+    round_trip: bool,
+) -> None:
+    explicit_values = {
+        "dtype": "float32",
+        "enable_async_decode": False,
+        "max_batch_wait_ms": 0.0,
+    }
+    if selection == "omitted":
+        factory = DecodeFactoryArgs()
+    elif selection == "none":
+        factory = DecodeFactoryArgs.model_validate(dict.fromkeys(explicit_values))
+    else:
+        factory = DecodeFactoryArgs.model_validate(explicit_values)
+    config = DecodePipelineConfig(
+        model_path="unused",
+        entry_stage="decode",
+        stages=[
+            DecodeStageConfig(
+                name="decode",
+                process="decode",
+                factory_path=FACTORY,
+                factory=factory,
+                terminal=True,
+            )
+        ],
+    )
+    if round_trip:
+        config = DecodePipelineConfig.model_validate(config.model_dump())
+    else:
+        pass
+    stage = config.stage_named("decode")
+    if replica:
+        stage = stage.model_copy(update={"name": "decode@r0"})
+    else:
+        pass
+    resolved = apply_typed_stage_kwargs(
+        dummy_factory,
+        resolve_stage_factory_kwargs(stage, config),
+        resolve_stage_typed_kwargs(stage),
+        stage_name=stage.name,
+    )
+    expected = (
+        explicit_values
+        if selection == "explicit"
+        else config.stage_factory_kwargs("decode")
+    )
+    assert resolved == expected
+
+
+@pytest.mark.parametrize("use_none", [False, True])
+def test_factory_fallbacks_without_author_overrides(use_none: bool) -> None:
+    expected = {
+        "dtype": "bfloat16",
+        "enable_async_decode": False,
+        "max_batch_wait_ms": 10.0,
+    }
+    factory = (
+        DecodeFactoryArgs.model_validate(dict.fromkeys(expected))
+        if use_none
+        else DecodeFactoryArgs()
+    )
+    stage = DecodeStageConfig(
+        name="decode",
+        process="decode",
+        factory_path=FACTORY,
+        factory=factory,
+        terminal=True,
+    )
+    config = PipelineConfig(model_path="unused", entry_stage="decode", stages=[stage])
+    resolved = apply_typed_stage_kwargs(
+        dummy_factory,
+        resolve_stage_factory_kwargs(stage, config),
+        resolve_stage_typed_kwargs(stage),
+        stage_name=stage.name,
+    )
+    assert resolved == expected

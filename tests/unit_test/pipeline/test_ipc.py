@@ -45,6 +45,7 @@ from sglang_omni.serve.server_warmup import (
 )
 from sglang_omni.serve.speech_to_text import SpeechToTextForm, parse_speech_to_text_form
 from sglang_omni.serve.transcriptions import TRANSCRIPTIONS_ENDPOINT
+from tests.unit_test.fixtures.image_media import register_test_images
 from tests.unit_test.fixtures.pipeline_fakes import FakeMpContext, FakeRelay
 
 
@@ -577,6 +578,32 @@ async def run_launcher_with_fake_runner(
     await launcher.run_server(config, host=host, port=8000)
     assert runner_ref is not None
     return runner_ref, app, profiler_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_registrar", [False, True])
+async def test_launcher_resolves_image_registrar_from_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    has_registrar: bool,
+) -> None:
+    monkeypatch.setattr(
+        PipelineConfig,
+        "image_api_registrar",
+        (
+            "tests.unit_test.fixtures.image_media.register_test_images"
+            if has_registrar
+            else None
+        ),
+    )
+    _, app, _ = await run_launcher_with_fake_runner(
+        config=make_config(tmp_path),
+        serve_mock=AsyncMock(return_value=None),
+        monkeypatch=monkeypatch,
+    )
+    assert app.state.create_app_kwargs["image_api_registrar"] is (
+        register_test_images if has_registrar else None
+    )
 
 
 @pytest.mark.asyncio

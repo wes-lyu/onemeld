@@ -182,6 +182,10 @@ running+queued capacity of an engine phase stage), `max_retained_bytes`, and
 non-positive bound, at load time. Accepted segments stream to the client in
 order through the output stage when the request streams.
 
+### Planned multi-model composition
+
+The controller factory also accepts an optional `composition` specification. It selects the public `UMMCompositionAdapter`, whose model-generated plans call configured capabilities and exchange typed text/image artifacts. Model packages supply stage/model bindings and capability descriptions rather than their own planner and executor. Without `composition`, existing adapters keep their original constructor and execution contract. See [UMM composition](umm_composition.md) for the configuration, plan format, native protocols and supported scope.
+
 ### Code2WavScheduler
 
 `Code2WavScheduler` is a streaming vocoder scheduler. It handles:

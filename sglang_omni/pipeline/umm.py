@@ -26,6 +26,7 @@ from sglang_omni.admission import QueueFullError
 from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
+from sglang_omni.pipeline.umm_plan import COMPOSITION_ADAPTER_PATH, UMMCompositionSpec
 from sglang_omni.proto.request import OmniRequest, RoutedPayloads, StagePayload
 from sglang_omni.proto.session import SESSION_METADATA_KEY
 from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
@@ -737,7 +738,8 @@ class UMMOutputRelay:
 def create_umm_controller(
     model_path: str,
     *,
-    adapter: str,
+    adapter: str | None = None,
+    composition: UMMCompositionSpec | dict[str, JSONValue] | None = None,
     phases: Mapping[str, str],
     output_stage: str,
     max_dispatches: int,
@@ -747,18 +749,37 @@ def create_umm_controller(
     timeout_s: float,
     stage_name: str = "orchestrator",
 ) -> UMMController:
-    """Build the controller around the adapter of the model being served.
+    """Build a legacy model adapter or the public composition executor.
 
-    adapter is the import path of a callable that takes model_path and
-    returns the model's UMMAdapter. stage_name is the controller's stage,
-    which UMMPipelineConfig passes so that errors name its settings.
+    Without composition, adapter keeps its original one-argument contract.
+    Composition capabilities select the shared executor and its phase bindings.
     """
-    adapter_factory = import_string(adapter)
+    if composition is not None:
+        specification = UMMCompositionSpec.model_validate(composition)
+        if adapter not in (None, COMPOSITION_ADAPTER_PATH):
+            raise ValueError(
+                "composition cannot be combined with a model-specific adapter"
+            )
+        elif dict(phases) != specification.phases:
+            raise ValueError("UMM phases must match composition capability bindings")
+        else:
+            adapter = COMPOSITION_ADAPTER_PATH
+    else:
+        specification = None
+    if adapter is None:
+        raise ValueError("UMM requires an adapter or a composition specification")
+    else:
+        adapter_factory = import_string(adapter)
     if not callable(adapter_factory):
         raise TypeError(f"UMM adapter factory {adapter!r} is not callable")
     else:
         pass
-    model_adapter = adapter_factory(model_path)
+    if specification is None:
+        model_adapter = adapter_factory(model_path)
+    else:
+        model_adapter = adapter_factory(
+            model_path, composition=specification, stage_name=stage_name
+        )
     if not isinstance(model_adapter, UMMAdapter):
         raise TypeError(f"{adapter!r} did not return a UMMAdapter")
     else:
@@ -858,6 +879,34 @@ class UMMPipelineConfig(PipelineConfig):
             pass
         factory_args = resolve_stage_typed_kwargs(controller)
         phases = factory_args.get("phases")
+        composition = factory_args.get("composition")
+        if composition is not None:
+            specification = UMMCompositionSpec.model_validate(composition)
+            if factory_args.get("adapter") not in (None, COMPOSITION_ADAPTER_PATH):
+                raise ValueError(
+                    "composition cannot be combined with a model-specific adapter"
+                )
+            elif phases != specification.phases:
+                raise ValueError(
+                    "UMM phases must match composition capability bindings"
+                )
+            elif (
+                isinstance(factory_args.get("max_dispatches"), int)
+                and factory_args["max_dispatches"]
+                < specification.max_steps + specification.max_plan_attempts
+            ):
+                raise ValueError(
+                    "composition max_dispatches must cover plan attempts and max_steps"
+                )
+            elif (
+                isinstance(factory_args.get("max_outputs"), int)
+                and factory_args["max_outputs"] < specification.max_steps
+            ):
+                raise ValueError("composition max_outputs must cover max_steps")
+            else:
+                pass
+        else:
+            pass
         phase_targets = list(phases.values()) if isinstance(phases, Mapping) else []
         phase_stages = {name for name in phase_targets if isinstance(name, str)}
         streaming_phase_stages = sorted(

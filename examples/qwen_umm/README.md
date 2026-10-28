@@ -5,8 +5,12 @@ Send a natural-language task, with optional images and speech, through one Chat 
 | Configuration | Capabilities | Models |
 | --- | --- | --- |
 | `QwenUMMPipelineConfig` ([launch.yaml](launch.yaml)) | `respond`, `generate_image` | Qwen2.5-VL, Qwen-Image-2512 |
-| `QwenAnyToAnyPipelineConfig` ([launch_any_to_any.yaml](launch_any_to_any.yaml)) | adds `transcribe`, `speak` | adds Qwen3-ASR, Qwen3-TTS |
+| `QwenSpeechInPipelineConfig` ([launch_speech_in.yaml](launch_speech_in.yaml)) | adds `transcribe` | adds Qwen3-ASR |
+| `QwenEditPipelineConfig` ([launch_edit.yaml](launch_edit.yaml)) | `respond`, `edit_image` | Qwen2.5-VL, Qwen-Image-Edit at `model_path` |
+| `QwenAnyToAnyPipelineConfig` ([launch_any_to_any.yaml](launch_any_to_any.yaml)) | `respond`, `generate_image`, `transcribe`, `speak` | adds Qwen3-TTS |
 | `QwenAnyToAnyEditPipelineConfig` ([launch_any_to_any_edit.yaml](launch_any_to_any_edit.yaml)) | adds `edit_image` | adds Qwen-Image-Edit |
+
+On an RTX 4090 (48 GB, 94 GB host memory) the first three profiles start. Qwen3-TTS cannot capture its code predictor graph on sm_89 GPUs, so the `speak` profiles need another GPU. The full edit profile holds two offloaded diffusion models and did not fit in 94 GB of host memory; use the edit-only profile there. Edits and generations are both 512x512.
 
 ```text
 POST /v1/chat/completions (text, image_url, input_audio parts)
@@ -21,7 +25,21 @@ POST /v1/chat/completions (text, image_url, input_audio parts)
   → one Chat Completion with the published segments in order
 ```
 
-The any-to-any configurations default to iterative mode and also allow plan mode; a request picks one with `stage_params.orchestrator.mode`. The text-to-image configuration plans upfront.
+The any-to-any configurations default to iterative mode and also allow plan mode; a request picks one with `stage_params.orchestrator.mode`. The text-to-image configuration plans upfront by default and also allows iterative mode.
+
+## First demo: draw, check, redraw
+
+The smallest run of the new path needs only the two text-to-image models. Start the server with [launch.yaml](launch.yaml), keep its log, and run [demo.sh](demo.sh) from the repository root:
+
+```bash
+python -m sglang_omni.cli serve --config examples/qwen_umm/launch.yaml --model-path /path/to/Qwen-Image-2512 --text-model-path /path/to/Qwen2.5-VL-3B-Instruct --host 127.0.0.1 --port 8897 2>&1 | tee server.log
+```
+
+```bash
+examples/qwen_umm/demo.sh http://127.0.0.1:8897 server.log
+```
+
+It sends one task, to draw a red apple on a blue plate, check the picture and redraw it if wrong, once in iterative mode and once in plan mode. It passes when each run returns an image, the iterative trace shows at least two planner turns (the planner saw the drawing before deciding), and the plan trace shows one. Each run's segments, report and trace excerpt land in `results/demo/<mode>/`. Whether the 3B planner judges the apple correctly is a quality question, not part of the pass.
 
 ## Launch
 
@@ -63,10 +81,14 @@ An iterative turn names the steps to run now and, when the task is done, the out
 ```
 
 ```json
-{"steps": [{"id": "caption", "action": "respond", "instruction": "Describe the drawing in one sentence", "input_refs": ["fox"]}, {"id": "voice", "action": "speak", "instruction": "Read the caption aloud", "input_refs": ["caption"]}], "final": {"publish": ["fox", "voice"], "answer": ""}}
+{"steps": [{"id": "caption", "action": "respond", "instruction": "Describe the drawing in one sentence", "input_refs": ["fox"]}], "final": null}
 ```
 
-The server checks every reply before any step runs: configured actions, unique IDs, references to existing artifacts of accepted kinds, the step, turn and media budgets, and a final output that publishes only step results. A rejected reply goes back to the planner with its error for one repair; a second rejection fails the request. The configurations enable tracing: `UMM composition trace` log entries record accepted and rejected replies, each dispatch with its stage and input hashes, each artifact and each replanning point, keyed by the `execution_id` of the returned segments.
+```json
+{"steps": [], "final": {"publish": ["fox", "caption"], "answer": ""}}
+```
+
+A turn either runs steps or finishes; a turn that does both has its `final` dropped, so the planner always sees a result before publishing it. The server renames repeated or `user_`-prefixed step IDs, then checks every reply before any step runs: configured actions, references to existing artifacts of accepted kinds, the step, turn and media budgets, and a final output that publishes only step results. A rejected reply goes back to the planner with its error for one sampled repair; a second rejection fails the request with HTTP 422. The configurations enable tracing: `UMM composition trace` log entries record accepted and rejected replies, each dispatch with its stage and input hashes, each artifact and each replanning point, keyed by the `execution_id` of the returned segments.
 
 A 3B planner can misread a task even when its reply is valid, so inspect the traced replies as well as the segments when evaluating a deployment. A larger Qwen2.5-VL planner needs a larger `understanding` budget.
 

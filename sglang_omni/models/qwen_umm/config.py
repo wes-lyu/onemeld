@@ -20,6 +20,7 @@ from sglang_omni.pipeline.umm import (
     UMMPipelineConfig,
 )
 from sglang_omni.pipeline.umm_plan import (
+    ExecutionMode,
     UMMCapability,
     UMMCompositionSpec,
     UMMExecutionPlan,
@@ -64,7 +65,7 @@ EDIT_IMAGE = UMMCapability(
     protocol="native_image",
     description="Edit one referenced image as the instruction describes and return the edited image.",
     input_kinds=["text", "image"],
-    parameters={"num_inference_steps": 20},
+    parameters={"width": 512, "height": 512, "num_inference_steps": 20},
 )
 TRANSCRIBE = UMMCapability(
     stages=["asr"],
@@ -107,41 +108,127 @@ BICYCLE_EXAMPLE = UMMPlanExample(
     ),
 )
 
-QWEN_COMPOSITION = UMMCompositionSpec(
-    planner_stage="understanding",
-    capabilities={"generate_image": GENERATE_IMAGE, "respond": RESPOND},
-    plan_examples=[BICYCLE_EXAMPLE],
-    max_plan_attempts=2,
-    trace=True,
-)
+CAPABILITIES = {
+    "respond": RESPOND,
+    "generate_image": GENERATE_IMAGE,
+    "edit_image": EDIT_IMAGE,
+    "transcribe": TRANSCRIBE,
+    "speak": SPEAK,
+}
 
 
-def controller_stage(
-    composition: UMMCompositionSpec, next_stages: list[str]
-) -> StageConfig:
-    return StageConfig(
-        name="orchestrator",
-        process="orchestrator",
-        factory_path=CONTROLLER_FACTORY_PATH,
-        factory=FactoryArgs(
-            composition=composition.model_dump(mode="json"),
-            phases=composition.phases,
-            max_dispatches=composition.required_dispatches(),
-            max_outputs=composition.required_outputs(),
-            max_active=1,
-            max_retained_bytes=256 * 1024 * 1024,
-            timeout_s=1800.0,
-        ),
-        next=[*next_stages, "output"],
-        route_fn=ROUTE_FN_PATH,
-        stream_to=["output"],
-        stream_done_to_fn=STREAM_DONE_FN_PATH,
+def capability_stages(name: str) -> list[StageConfig]:
+    """The native stages that serve one capability."""
+    if name == "respond":
+        return [
+            EngineStageConfig(
+                name="understanding",
+                process="understanding",
+                factory_path=CHAT_FACTORY_PATH,
+                allow_child_processes=True,
+                factory=FactoryArgs(stage_name="understanding"),
+                gpu=0,
+                next="orchestrator",
+            )
+        ]
+    elif name in ("generate_image", "edit_image"):
+        stage = "generation" if name == "generate_image" else "edit"
+        return [
+            StageConfig(
+                name=stage,
+                process=stage,
+                factory_path=GENERATION_FACTORY_PATH,
+                allow_child_processes=True,
+                gpu=0,
+                next="orchestrator",
+            )
+        ]
+    elif name == "transcribe":
+        return [
+            StageConfig(
+                name="asr",
+                process="asr",
+                factory_path=ASR_FACTORY_PATH,
+                factory=FactoryArgs(max_running_requests=4, enable_torch_compile=False),
+                gpu=0,
+                next="orchestrator",
+            )
+        ]
+    else:
+        # One speech chain is one phase: the vocoder returns the waveform.
+        # note (Wes): stages are built in list order; the vocoder comes before
+        # the engine so its weights are resident when the KV pool is sized.
+        return [
+            StageConfig(
+                name="tts_preprocessing",
+                process="speech",
+                factory_path=f"{TTS_FACTORY_PREFIX}.create_preprocessing_executor",
+                next="tts_engine",
+            ),
+            StageConfig(
+                name="vocoder",
+                process="speech",
+                factory_path=f"{TTS_FACTORY_PREFIX}.create_vocoder_executor",
+                factory=FactoryArgs(dtype="bfloat16"),
+                gpu=0,
+                next="orchestrator",
+                can_accept_stream_before_payload=True,
+            ),
+            EngineStageConfig(
+                name="tts_engine",
+                process="speech",
+                factory_path=f"{TTS_FACTORY_PREFIX}.create_sglang_tts_engine_executor",
+                factory=FactoryArgs(dtype="bfloat16"),
+                gpu=0,
+                next="vocoder",
+                stream_to=["vocoder"],
+            ),
+        ]
+
+
+def qwen_stages(
+    capability_names: tuple[str, ...], execution_mode: ExecutionMode
+) -> list[StageConfig]:
+    """The controller, output relay and native stages of the named capabilities.
+
+    Qwen-VL plans on the understanding stage, so respond is always included.
+    """
+    names = ("respond", *capability_names)
+    composition = UMMCompositionSpec(
+        planner_stage="understanding",
+        capabilities={name: CAPABILITIES[name] for name in names},
+        plan_examples=[BICYCLE_EXAMPLE] if "generate_image" in names else [],
+        execution_mode=execution_mode,
+        allowed_modes=["plan", "iterative"],
+        max_planner_turns=4,
+        max_steps=8,
+        max_plan_attempts=2,
+        max_videos=0,
+        trace=True,
     )
-
-
-def base_stages() -> list[StageConfig]:
-    """The output relay, the Qwen-VL planner and the Qwen-Image generator."""
+    stages = [stage for name in names for stage in capability_stages(name)]
+    phase_entries = [
+        stage.name for stage in stages if stage.name not in ("tts_engine", "vocoder")
+    ]
     return [
+        StageConfig(
+            name="orchestrator",
+            process="orchestrator",
+            factory_path=CONTROLLER_FACTORY_PATH,
+            factory=FactoryArgs(
+                composition=composition.model_dump(mode="json"),
+                phases=composition.phases,
+                max_dispatches=composition.required_dispatches(),
+                max_outputs=composition.required_outputs(),
+                max_active=1,
+                max_retained_bytes=256 * 1024 * 1024,
+                timeout_s=1800.0,
+            ),
+            next=[*phase_entries, "output"],
+            route_fn=ROUTE_FN_PATH,
+            stream_to=["output"],
+            stream_done_to_fn=STREAM_DONE_FN_PATH,
+        ),
         StageConfig(
             name="output",
             process="orchestrator",
@@ -149,111 +236,7 @@ def base_stages() -> list[StageConfig]:
             terminal=True,
             can_accept_stream_before_payload=True,
         ),
-        EngineStageConfig(
-            name="understanding",
-            process="understanding",
-            factory_path=CHAT_FACTORY_PATH,
-            allow_child_processes=True,
-            factory=FactoryArgs(stage_name="understanding"),
-            gpu=0,
-            next="orchestrator",
-        ),
-        StageConfig(
-            name="generation",
-            process="generation",
-            factory_path=GENERATION_FACTORY_PATH,
-            allow_child_processes=True,
-            gpu=0,
-            next="orchestrator",
-        ),
-    ]
-
-
-def any_to_any_stages(includes_edit: bool) -> list[StageConfig]:
-    capabilities = {
-        "respond": RESPOND,
-        "generate_image": GENERATE_IMAGE,
-        "transcribe": TRANSCRIBE,
-        "speak": SPEAK,
-    }
-    if includes_edit:
-        capabilities["edit_image"] = EDIT_IMAGE
-    else:
-        pass
-    composition = UMMCompositionSpec(
-        planner_stage="understanding",
-        capabilities=capabilities,
-        plan_examples=[BICYCLE_EXAMPLE],
-        execution_mode="iterative",
-        allowed_modes=["iterative", "plan"],
-        max_planner_turns=4,
-        max_steps=8,
-        max_plan_attempts=2,
-        max_videos=0,
-        trace=True,
-    )
-    edit_stages = (
-        [
-            StageConfig(
-                name="edit",
-                process="edit",
-                factory_path=GENERATION_FACTORY_PATH,
-                allow_child_processes=True,
-                gpu=0,
-                next="orchestrator",
-            )
-        ]
-        if includes_edit
-        else []
-    )
-    return [
-        controller_stage(
-            composition,
-            [
-                "understanding",
-                "generation",
-                *(stage.name for stage in edit_stages),
-                "asr",
-                "tts_preprocessing",
-            ],
-        ),
-        *base_stages(),
-        *edit_stages,
-        StageConfig(
-            name="asr",
-            process="asr",
-            factory_path=ASR_FACTORY_PATH,
-            factory=FactoryArgs(max_running_requests=4, enable_torch_compile=False),
-            gpu=0,
-            next="orchestrator",
-        ),
-        # One speech chain is one phase: the vocoder returns the waveform.
-        StageConfig(
-            name="tts_preprocessing",
-            process="speech",
-            factory_path=f"{TTS_FACTORY_PREFIX}.create_preprocessing_executor",
-            next="tts_engine",
-        ),
-        # note (Wes): stages are built in list order; the vocoder comes before
-        # the engine so its weights are resident when the KV pool is sized.
-        StageConfig(
-            name="vocoder",
-            process="speech",
-            factory_path=f"{TTS_FACTORY_PREFIX}.create_vocoder_executor",
-            factory=FactoryArgs(dtype="bfloat16"),
-            gpu=0,
-            next="orchestrator",
-            can_accept_stream_before_payload=True,
-        ),
-        EngineStageConfig(
-            name="tts_engine",
-            process="speech",
-            factory_path=f"{TTS_FACTORY_PREFIX}.create_sglang_tts_engine_executor",
-            factory=FactoryArgs(dtype="bfloat16"),
-            gpu=0,
-            next="vocoder",
-            stream_to=["vocoder"],
-        ),
+        *stages,
     ]
 
 
@@ -269,10 +252,7 @@ class QwenUMMPipelineConfig(UMMPipelineConfig):
     text_model_path: str = "Qwen/Qwen2.5-VL-3B-Instruct"
     entry_stage: str = "orchestrator"
     stages: list[StageConfig] = Field(
-        default_factory=lambda: [
-            controller_stage(QWEN_COMPOSITION, ["understanding", "generation"]),
-            *base_stages(),
-        ]
+        default_factory=lambda: qwen_stages(("generate_image",), "plan")
     )
 
     def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
@@ -284,8 +264,43 @@ class QwenUMMPipelineConfig(UMMPipelineConfig):
             return super().stage_factory_kwargs(stage_name)
 
 
-class QwenAnyToAnyPipelineConfig(QwenUMMPipelineConfig):
-    """Adds Qwen3-ASR speech input and Qwen3-TTS speech output."""
+class QwenSpeechInPipelineConfig(QwenUMMPipelineConfig):
+    """Adds Qwen3-ASR speech input; replies are text and images."""
+
+    architecture: ClassVar[str] = "QwenUMMSpeechIn"
+    name: str = "qwen_umm_speech_in"
+    asr_model_path: str = "Qwen/Qwen3-ASR-1.7B"
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(
+            ("generate_image", "transcribe"), "iterative"
+        )
+    )
+
+    def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
+        if stage_name == "asr":
+            return {"model_path": self.asr_model_path}
+        else:
+            return super().stage_factory_kwargs(stage_name)
+
+
+class QwenEditPipelineConfig(QwenUMMPipelineConfig):
+    """Qwen-VL plans and inspects; Qwen-Image-Edit, at model_path, edits."""
+
+    architecture: ClassVar[str] = "QwenUMMEdit"
+    name: str = "qwen_umm_edit"
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(("edit_image",), "iterative")
+    )
+
+    def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
+        if stage_name == "edit":
+            return {"inline_media": True}
+        else:
+            return super().stage_factory_kwargs(stage_name)
+
+
+class QwenAnyToAnyPipelineConfig(QwenSpeechInPipelineConfig):
+    """Adds Qwen3-TTS speech output."""
 
     architecture: ClassVar[str] = "QwenUMMAnyToAny"
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
@@ -293,14 +308,15 @@ class QwenAnyToAnyPipelineConfig(QwenUMMPipelineConfig):
         "tts_engine": EngineStageConfig,
     }
     name: str = "qwen_umm_any_to_any"
-    asr_model_path: str = "Qwen/Qwen3-ASR-1.7B"
     tts_model_path: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-    stages: list[StageConfig] = Field(default_factory=lambda: any_to_any_stages(False))
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(
+            ("generate_image", "transcribe", "speak"), "iterative"
+        )
+    )
 
     def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
-        if stage_name == "asr":
-            return {"model_path": self.asr_model_path}
-        elif stage_name == "vocoder":
+        if stage_name == "vocoder":
             # Each request runs at most one speech phase at a time.
             max_active = resolve_stage_typed_kwargs(self.stage_named("orchestrator"))[
                 "max_active"
@@ -320,12 +336,16 @@ class QwenAnyToAnyPipelineConfig(QwenUMMPipelineConfig):
 
 
 class QwenAnyToAnyEditPipelineConfig(QwenAnyToAnyPipelineConfig):
-    """Adds a Qwen-Image-Edit stage for editing input and generated images."""
+    """Adds a Qwen-Image-Edit stage; holds two diffusion models in host memory."""
 
     architecture: ClassVar[str] = "QwenUMMAnyToAnyEdit"
     name: str = "qwen_umm_any_to_any_edit"
     edit_model_path: str = "Qwen/Qwen-Image-Edit-2509"
-    stages: list[StageConfig] = Field(default_factory=lambda: any_to_any_stages(True))
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(
+            ("generate_image", "edit_image", "transcribe", "speak"), "iterative"
+        )
+    )
 
     def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
         if stage_name == "edit":
@@ -336,6 +356,8 @@ class QwenAnyToAnyEditPipelineConfig(QwenAnyToAnyPipelineConfig):
 
 EntryClass = QwenUMMPipelineConfig
 Variants = {
+    "speech_in": QwenSpeechInPipelineConfig,
+    "edit": QwenEditPipelineConfig,
     "any_to_any": QwenAnyToAnyPipelineConfig,
     "any_to_any_edit": QwenAnyToAnyEditPipelineConfig,
 }

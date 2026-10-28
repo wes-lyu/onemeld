@@ -3,6 +3,7 @@
 
 import base64
 import io
+import json
 import wave
 from dataclasses import replace
 
@@ -11,7 +12,7 @@ import pytest
 from sglang_omni.client.client import Client
 from sglang_omni.client.image_media import InlineImage, InlineMedia
 from sglang_omni.client.types import GenerateRequest, Message, SamplingParams
-from sglang_omni.pipeline.umm import UMMController
+from sglang_omni.pipeline.umm import UMMController, UMMPlanningError
 from sglang_omni.pipeline.umm_plan import (
     UMMCompositionSpec,
     UMMExecutionPlan,
@@ -135,12 +136,7 @@ def test_speech_to_image_to_speech_runs_the_same_in_both_modes(
             for part in observation[3]["content"]
             if part["type"] == "image_url"
         ] == [inline_images[0].url]
-        stages.reply(
-            "planning_worker",
-            turn_reply(
-                [inspect, speak], UMMFinal(publish=["picture", "narration"], answer="")
-            ),
-        )
+        stages.reply("planning_worker", turn_reply([inspect, speak], None))
     else:
         pass
     inspection = stages.held["vision_worker"].request.inputs[-1]["content"]
@@ -153,6 +149,13 @@ def test_speech_to_image_to_speech_runs_the_same_in_both_modes(
     assert narration.inputs == "A red fox sleeps in the snow"
     assert narration.metadata["tts_params"] == {"voice": "Vivian"}
     stages.reply("speech_worker", waveform_result(sine_waveform(800)))
+    if mode == "iterative":
+        stages.reply(
+            "planning_worker",
+            turn_reply([], UMMFinal(publish=["picture", "narration"], answer="")),
+        )
+    else:
+        pass
     segments = stages.segments()
     assert [segment["kind"] for segment in segments] == ["image", "audio"]
     assert segments[0]["data"] == inline_images[0].model_dump()
@@ -162,31 +165,23 @@ def test_speech_to_image_to_speech_runs_the_same_in_both_modes(
     assert not controller.adapter.executions
 
 
-@pytest.mark.parametrize("mode", ["plan", "iterative"])
 def test_independent_steps_spread_over_replicas_and_publish_in_order(
-    controller: UMMController, inline_images: list[InlineImage], mode: str
+    controller: UMMController, inline_images: list[InlineImage]
 ) -> None:
     """Parallel results arrive out of order; segments keep the planned order."""
     stages = FakeStages(controller, "replicas")
     stages.submit(
         OmniRequest(
             "Draw three cats and pick one",
-            metadata={"composition": {"mode": mode, "seed": 7}},
+            metadata={"composition": {"mode": "plan", "seed": 7}},
         )
     )
     paints = [call(f"cat_{index}", "paint") for index in range(3)]
     verdict = call("verdict", "inspect", "cat_0", "cat_1", "cat_2")
-    publish = ["cat_0", "cat_1", "cat_2", "verdict"]
-    if mode == "plan":
-        stages.reply(
-            "planning_worker",
-            plan_reply(*(planned(step, True) for step in [*paints, verdict])),
-        )
-    else:
-        stages.reply(
-            "planning_worker",
-            turn_reply([*paints, verdict], UMMFinal(publish=publish, answer="")),
-        )
+    stages.reply(
+        "planning_worker",
+        plan_reply(*(planned(step, True) for step in [*paints, verdict])),
+    )
     assert set(stages.held) == {"image_a", "image_b"}
     assert [
         stages.held[stage].request.inputs["seed"] for stage in ("image_a", "image_b")
@@ -258,6 +253,38 @@ def test_iterative_turns_retry_and_publish_only_the_accepted_result(
     assert not controller.adapter.executions
 
 
+def test_iterative_turn_observes_its_steps_before_publishing(
+    controller: UMMController, inline_images: list[InlineImage]
+) -> None:
+    """A turn that runs steps and publishes them at once is made to observe them first."""
+    stages = FakeStages(controller, "shortcut")
+    stages.submit(
+        OmniRequest("Draw an apple", metadata={"composition": {"mode": "iterative"}})
+    )
+    stages.reply(
+        "planning_worker",
+        turn_reply(
+            [call("apple", "paint"), call("check", "inspect", "apple")],
+            UMMFinal(publish=["apple", "check"], answer="Here it is"),
+        ),
+    )
+    stages.reply("image_a", media_result(inline_images[0]))
+    stages.reply("vision_worker", {"text": "A red apple on a blue plate"})
+    observation = stages.held["planning_worker"].request.inputs
+    assert json.loads(observation[2]["content"])["final"] is None
+    assert [
+        part["image_url"]["url"]
+        for part in observation[3]["content"]
+        if part["type"] == "image_url"
+    ] == [inline_images[0].url]
+    stages.reply(
+        "planning_worker", turn_reply([], UMMFinal(publish=["apple"], answer=""))
+    )
+    assert [segment["data"] for segment in stages.segments()] == [
+        inline_images[0].model_dump()
+    ]
+
+
 def test_last_turn_without_final_is_rejected(
     composition: UMMCompositionSpec,
 ) -> None:
@@ -271,7 +298,7 @@ def test_last_turn_without_final_is_rejected(
     stages.reply("planning_worker", turn_reply([call("first", "paint")], None))
     stages.reply("image_a", media_result(InlineImage.from_png("eA==")))
     planning = stages.held.pop("planning_worker")
-    with pytest.raises(ValueError, match="last planner turn"):
+    with pytest.raises(UMMPlanningError, match="last planner turn"):
         controller.transition(
             replace(planning, data=turn_reply([call("second", "paint")], None))
         )

@@ -221,6 +221,18 @@ class UMMRequestError(ValueError):
         super().__init__(self.PREFIX + detail)
 
 
+class UMMPlanningError(RuntimeError):
+    """A planner whose replies stayed invalid after every allowed repair.
+
+    The serving error classifier maps the message prefix to HTTP 422.
+    """
+
+    PREFIX = "UMM planning failed: "
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(self.PREFIX + detail)
+
+
 class UMMDeadlineError(TimeoutError):
     """A UMM request reached its timeout_s deadline. Its close reason is expired."""
 
@@ -421,8 +433,8 @@ class UMMController(
     def advance(self, payload: StagePayload) -> StagePayload | RoutedPayloads | None:
         try:
             return self.transition(payload)
-        except (QueueFullError, UMMRequestError) as exc:
-            # Rejections of client requests are expected and need no traceback.
+        except (QueueFullError, UMMRequestError, UMMPlanningError) as exc:
+            # Rejections and planner failures are expected and need no traceback.
             self.emit_error(payload.request_id, exc, self.outbox)
             return None
 

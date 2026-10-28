@@ -14,6 +14,7 @@ from sglang_omni.pipeline.umm import (
     UMMContext,
     UMMDispatch,
     UMMOutput,
+    UMMPlanningError,
     UMMRequestError,
     UMMStep,
 )
@@ -26,7 +27,8 @@ from sglang_omni.pipeline.umm_plan import (
     UMMFinal,
     UMMPlannerTurn,
     UMMStepCall,
-    turn_from_plan,
+    normalize_steps,
+    plan_calls,
 )
 from sglang_omni.pipeline.umm_planner import (
     PlannerBudget,
@@ -44,7 +46,9 @@ from sglang_omni.pipeline.umm_task import ClientTask, parse_task
 logger = logging.getLogger(__name__)
 
 SEEDED_PROTOCOLS = ("native_image", "native_video")
-TraceEvent = Literal["plan", "plan_rejected", "dispatch", "artifact", "observe"]
+TraceEvent = Literal[
+    "plan", "plan_rejected", "normalized", "dispatch", "artifact", "observe"
+]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -190,12 +194,8 @@ class UMMCompositionAdapter:
             response = NativeTextResult.model_validate(result)
             if response.finish_reason != "stop":
                 raise ValueError("Planning did not finish; refusing a partial reply")
-            elif execution.task.mode == "plan":
-                reply = turn_from_plan(
-                    UMMExecutionPlan.model_validate_json(response.text)
-                )
             else:
-                reply = UMMPlannerTurn.model_validate_json(response.text)
+                reply = self.normalize_reply(context, response.text, budget)
             composition.validate_steps(
                 reply.steps,
                 {name: artifact.kind for name, artifact in execution.artifacts.items()},
@@ -222,23 +222,26 @@ class UMMCompositionAdapter:
             else:
                 pass
         except ValueError as error:
+            attempt = execution.plan_attempts
             self.emit_trace(
                 context,
                 "plan_rejected",
                 {
                     "response": reply_text,
                     "error": str(error),
-                    "attempt": execution.plan_attempts,
+                    "attempt": attempt,
                 },
             )
             if (
-                execution.plan_attempts < composition.max_plan_attempts
+                attempt < composition.max_plan_attempts
                 and context.remaining_dispatches >= 1
             ):
                 execution.repair = UMMPlanRepair(response=reply_text, error=str(error))
                 return self.planner_step(context, ())
             else:
-                raise
+                raise UMMPlanningError(
+                    f"{error} (after {attempt} planner attempts; trace execution_id={context.execution_id})"
+                ) from error
         for step in reply.steps:
             seeded = composition.capabilities[step.action].protocol in SEEDED_PROTOCOLS
             execution.pending.append(
@@ -246,7 +249,8 @@ class UMMCompositionAdapter:
             )
             execution.seeded_steps += seeded
         execution.accepted_steps += len(reply.steps)
-        execution.turns.append(PlannerTurnRecord(response=response.text))
+        # The history shows the reply as it runs, with any renamed IDs.
+        execution.turns.append(PlannerTurnRecord(response=reply.model_dump_json()))
         execution.final = reply.final
         execution.plan_attempts = 0
         execution.repair = None
@@ -260,6 +264,69 @@ class UMMCompositionAdapter:
             },
         )
         return self.schedule(context)
+
+    def normalize_reply(
+        self, context: UMMContext, text: str, budget: PlannerBudget
+    ) -> UMMPlannerTurn:
+        """Parse a reply and fix what the server can fix without the planner.
+
+        Repeated or input-named step IDs are renamed. In iterative mode a turn
+        that runs steps observes them before publishing, so its final output is
+        dropped; on the last turn, which must finish, only an answer written
+        before the results is dropped.
+        """
+        execution = self.executions[context.execution_id]
+        existing = set(execution.artifacts)
+        dropped: list[str] = []
+        if execution.task.mode == "plan":
+            plan = UMMExecutionPlan.model_validate_json(text)
+            normalized = normalize_steps(plan_calls(plan), existing)
+            final = UMMFinal(
+                publish=[
+                    step.id
+                    for step, planned in zip(normalized.steps, plan.steps, strict=True)
+                    if planned.publish
+                ],
+                answer="",
+            )
+        else:
+            turn = UMMPlannerTurn.model_validate_json(text)
+            normalized = normalize_steps(turn.steps, existing)
+            final = (
+                None
+                if turn.final is None
+                else UMMFinal(
+                    publish=[
+                        normalized.latest.get(name, name) for name in turn.final.publish
+                    ],
+                    answer=turn.final.answer,
+                )
+            )
+            if final is None or not turn.steps:
+                pass
+            elif not budget.is_last_turn:
+                final = None
+                dropped.append("final")
+            elif final.answer:
+                final = UMMFinal(
+                    publish=final.publish or [step.id for step in normalized.steps],
+                    answer="",
+                )
+                dropped.append("answer")
+            else:
+                pass
+        if normalized.renames or dropped:
+            self.emit_trace(
+                context,
+                "normalized",
+                {
+                    "renamed": [list(rename) for rename in normalized.renames],
+                    "dropped": dropped,
+                },
+            )
+        else:
+            pass
+        return UMMPlannerTurn(steps=normalized.steps, final=final)
 
     def schedule(self, context: UMMContext) -> UMMStep:
         """Dispatch ready steps to free stages, then publish, wait, finish or replan."""

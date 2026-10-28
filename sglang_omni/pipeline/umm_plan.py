@@ -14,6 +14,8 @@ COMPOSITION_ADAPTER_PATH = "sglang_omni.pipeline.umm_composition.UMMCompositionA
 PLAN_PHASE = "plan"
 INPUT_IMAGE_ID = "input_image"
 USER_ARTIFACT_PREFIX = "user_"
+# Leaves room for a numbered suffix within the 32-character step ID limit.
+MAX_RENAMED_BASE = 28
 ArtifactKind = Literal["text", "image", "video", "audio"]
 CapabilityProtocol = Literal[
     "native_chat", "native_image", "native_video", "asr", "tts"
@@ -211,21 +213,62 @@ class UMMPlannerTurn(BaseModel):
     def validate_turn(self) -> "UMMPlannerTurn":
         if not self.steps and self.final is None:
             raise ValueError("A planner turn must run steps or return final")
-        elif self.steps and self.final is not None and self.final.answer:
-            raise ValueError(
-                "A final answer can only follow observed results; return it in a later turn"
-            )
         else:
             return self
+
+
+@dataclass(frozen=True, kw_only=True)
+class NormalizedSteps:
+    """A reply's steps with free IDs, and the ID each reply name now denotes."""
+
+    steps: list[UMMStepCall]
+    latest: dict[str, str]
+    renames: list[tuple[str, str]]
+
+
+def normalize_steps(steps: list[UMMStepCall], existing: set[str]) -> NormalizedSteps:
+    """Rename step IDs that repeat or take an input's name; references follow.
+
+    A reference names the latest earlier step of that name in the reply, or
+    else an existing artifact, so "generate" twice becomes generate, generate_2.
+    """
+    taken = existing | {INPUT_IMAGE_ID}
+    latest: dict[str, str] = {}
+    renames: list[tuple[str, str]] = []
+    normalized: list[UMMStepCall] = []
+    for step in steps:
+        input_refs = [latest.get(reference, reference) for reference in step.input_refs]
+        step_id = step.id
+        if step_id in taken or step_id.startswith(USER_ARTIFACT_PREFIX):
+            base = step_id.removeprefix(USER_ARTIFACT_PREFIX)
+            base = (base if base[:1].isalpha() else f"step_{base}")[:MAX_RENAMED_BASE]
+            step_id = base
+            number = 2
+            while step_id in taken or step_id.startswith(USER_ARTIFACT_PREFIX):
+                step_id = f"{base}_{number}"
+                number += 1
+            renames.append((step.id, step_id))
+        else:
+            pass
+        taken.add(step_id)
+        latest[step.id] = step_id
+        normalized.append(
+            step.model_copy(update={"id": step_id, "input_refs": input_refs})
+        )
+    return NormalizedSteps(steps=normalized, latest=latest, renames=renames)
+
+
+def plan_calls(plan: UMMExecutionPlan) -> list[UMMStepCall]:
+    return [
+        UMMStepCall.model_validate(step.model_dump(exclude={"publish"}))
+        for step in plan.steps
+    ]
 
 
 def turn_from_plan(plan: UMMExecutionPlan) -> UMMPlannerTurn:
     """The equivalent single turn of an upfront plan."""
     return UMMPlannerTurn(
-        steps=[
-            UMMStepCall.model_validate(step.model_dump(exclude={"publish"}))
-            for step in plan.steps
-        ],
+        steps=plan_calls(plan),
         final=UMMFinal(
             publish=[step.id for step in plan.steps if step.publish], answer=""
         ),

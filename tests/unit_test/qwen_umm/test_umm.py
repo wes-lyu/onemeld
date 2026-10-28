@@ -9,6 +9,7 @@ from sglang_omni.config.schema import FactoryArgs
 from sglang_omni.models.qwen_umm.config import (
     QwenAnyToAnyEditPipelineConfig,
     QwenAnyToAnyPipelineConfig,
+    QwenSpeechInPipelineConfig,
 )
 from sglang_omni.pipeline.umm import create_umm_controller
 from sglang_omni.pipeline.umm_composition import UMMCompositionAdapter
@@ -67,15 +68,59 @@ def test_any_to_any_config_binds_each_checkpoint_to_its_native_stage(
         assert configuration.stage_named(stage_name).factory_path == factory_path
 
 
-def test_text_to_image_config_keeps_its_two_capabilities() -> None:
-    configuration = ConfigManager.from_file("examples/qwen_umm/launch.yaml").config
+@pytest.mark.parametrize(
+    "profile, capabilities, default_mode, model_stages",
+    [
+        (
+            "launch.yaml",
+            {"generate_image", "respond"},
+            "plan",
+            {"understanding", "generation"},
+        ),
+        (
+            "launch_speech_in.yaml",
+            {"generate_image", "respond", "transcribe"},
+            "iterative",
+            {"understanding", "generation", "asr"},
+        ),
+        (
+            "launch_edit.yaml",
+            {"edit_image", "respond"},
+            "iterative",
+            {"understanding", "edit"},
+        ),
+    ],
+)
+def test_profiles_without_speech_output_run_both_modes(
+    profile: str, capabilities: set[str], default_mode: str, model_stages: set[str]
+) -> None:
+    """These 4090 profiles declare no TTS stage; loading checks the iterative budget."""
+    configuration = ConfigManager.from_file(f"examples/qwen_umm/{profile}").config
     adapter = create_umm_controller(
         configuration.model_path,
         output_stage="output",
         **resolve_stage_typed_kwargs(configuration.stage_named("orchestrator")),
     ).adapter
     assert isinstance(adapter, UMMCompositionAdapter)
-    assert set(adapter.composition.capabilities) == {"generate_image", "respond"}
+    assert set(adapter.composition.capabilities) == capabilities
+    assert adapter.composition.execution_mode == default_mode
+    assert set(adapter.composition.allowed_modes) == {"plan", "iterative"}
+    assert {stage.name for stage in configuration.stages} == {
+        "orchestrator",
+        "output",
+        *model_stages,
+    }
+    if isinstance(configuration, QwenSpeechInPipelineConfig):
+        assert configuration.stage_factory_kwargs("asr") == {
+            "model_path": configuration.asr_model_path
+        }
+    else:
+        pass
+    if "edit" in model_stages:
+        # The edit-only profile loads Qwen-Image-Edit from model_path.
+        assert configuration.stage_factory_kwargs("edit") == {"inline_media": True}
+    else:
+        pass
 
 
 def test_controller_budget_below_the_iterative_requirement_is_rejected() -> None:

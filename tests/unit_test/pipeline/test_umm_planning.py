@@ -6,7 +6,12 @@ from dataclasses import replace
 
 import pytest
 
-from sglang_omni.pipeline.umm import UMMController, create_umm_controller
+from sglang_omni.client.image_media import InlineImage
+from sglang_omni.pipeline.umm import (
+    UMMController,
+    UMMPlanningError,
+    create_umm_controller,
+)
 from sglang_omni.pipeline.umm_plan import (
     UMMCapability,
     UMMCompositionSpec,
@@ -15,7 +20,12 @@ from sglang_omni.pipeline.umm_plan import (
     UMMPlanStep,
 )
 from sglang_omni.proto.request import OmniRequest
-from tests.unit_test.fixtures.umm_stages import FakeStages, build_controller
+from sglang_omni.serve.openai_errors import generation_error_status_code
+from tests.unit_test.fixtures.umm_stages import (
+    FakeStages,
+    build_controller,
+    media_result,
+)
 
 pytest_plugins = ["tests.unit_test.fixtures.umm_composition"]
 
@@ -43,7 +53,7 @@ def rejected(
         )
     )
     planning = stages.held.pop("planning_worker")
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(UMMPlanningError, match=message):
         controller.transition(
             replace(planning, data={"text": text, "finish_reason": finish_reason})
         )
@@ -54,8 +64,6 @@ def rejected(
     "steps, finish_reason, message",
     [
         ([{**STEP, "input_refs": ["later"]}], "stop", "unavailable"),
-        ([STEP, STEP], "stop", "Duplicate"),
-        ([{**STEP, "id": "user_answer"}], "stop", "reserved"),
         (
             [
                 {**STEP, "id": "photo", "action": "paint"},
@@ -76,8 +84,6 @@ def rejected(
     ],
     ids=[
         "forward-reference",
-        "duplicate-id",
-        "reserved-id",
         "wrong-kind",
         "missing-required-audio",
         "missing-input",
@@ -113,17 +119,13 @@ def test_invalid_steps_never_dispatch_in_either_mode(
             "only step outputs",
         ),
         (
-            {"steps": [STEP], "final": {"publish": ["answer", "answer"], "answer": ""}},
+            {"steps": [], "final": {"publish": ["answer", "answer"], "answer": ""}},
             "twice",
-        ),
-        (
-            {"steps": [STEP], "final": {"publish": ["answer"], "answer": "Too early"}},
-            "observed results",
         ),
         ({"steps": [], "final": {"publish": [], "answer": " "}}, "at least one output"),
         ({"steps": [], "final": None}, "run steps or return final"),
     ],
-    ids=["input", "unknown", "duplicate", "answer-before-results", "empty", "no-work"],
+    ids=["input", "unknown", "duplicate", "empty", "no-work"],
 )
 def test_final_output_publishes_only_step_outputs(
     controller: UMMController, reply: dict[str, object], message: str
@@ -279,23 +281,29 @@ def test_invalid_reply_gets_only_a_bounded_model_repair(
         if mode == "plan":
             return json.dumps({"steps": [{**step, "publish": True}]})
         else:
-            return json.dumps(
-                {"steps": [step], "final": {"publish": ["answer"], "answer": ""}}
-            )
+            return json.dumps({"steps": [step], "final": None})
 
+    first = stages.held["planning_worker"].request
     stages.reply("planning_worker", {"text": reply(["answer"])})
-    repair = stages.held["planning_worker"].request.inputs
-    assert repair[-2]["content"] == reply(["answer"])
-    assert "unavailable" in repair[-1]["content"]
+    repair = stages.held["planning_worker"].request
+    assert repair.inputs[-2]["content"] == reply(["answer"])
+    assert "unavailable" in repair.inputs[-1]["content"]
+    # The first reply decodes greedily; the repair samples so it can differ.
+    assert (first.params["temperature"], repair.params["temperature"]) == (0.0, 0.7)
     if repair_succeeds:
         stages.reply("planning_worker", {"text": reply([])})
         stages.reply("vision_worker", {"text": "A corrected answer"})
+        if mode == "iterative":
+            finish = {"steps": [], "final": {"publish": ["answer"], "answer": ""}}
+            stages.reply("planning_worker", {"text": json.dumps(finish)})
+        else:
+            pass
         assert [segment["data"] for segment in stages.segments()] == [
             "A corrected answer"
         ]
     else:
         planning = stages.held.pop("planning_worker")
-        with pytest.raises(ValueError, match="unavailable"):
+        with pytest.raises(UMMPlanningError, match="after 2 planner attempts"):
             controller.transition(replace(planning, data={"text": reply(["answer"])}))
     assert not controller.adapter.executions
 
@@ -360,3 +368,72 @@ def test_empty_planner_reply_gets_a_repair(composition: UMMCompositionSpec) -> N
     repair = stages.held["planning_worker"].request.inputs
     assert repair[-2] == {"role": "assistant", "content": ""}
     assert "rejected" in repair[-1]["content"]
+
+
+@pytest.mark.parametrize("mode", ["plan", "iterative"])
+def test_repeated_and_input_named_step_ids_are_renamed(
+    controller: UMMController, inline_images: list[InlineImage], mode: str
+) -> None:
+    """IDs a small planner reuses are renamed; references follow the latest step."""
+    stages = FakeStages(controller, "renamed")
+    stages.submit(
+        OmniRequest(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Draw twice and edit my photo"},
+                        {"type": "image_url", "image_url": inline_images[2].url},
+                    ],
+                }
+            ],
+            params={"stage_params": {"orchestrator": {"mode": mode}}},
+        )
+    )
+    steps = [
+        {**STEP, "id": "generate", "action": "paint"},
+        {**STEP, "id": "generate", "action": "paint"},
+        {
+            **STEP,
+            "id": "user_image_1",
+            "action": "retouch",
+            "input_refs": ["user_image_1"],
+        },
+        {**STEP, "id": "check", "input_refs": ["generate", "user_image_1"]},
+    ]
+    if mode == "plan":
+        text = json.dumps({"steps": [{**step, "publish": True} for step in steps]})
+    else:
+        text = json.dumps({"steps": steps, "final": None})
+    stages.reply("planning_worker", {"text": text})
+    assert stages.held["editor"].request.inputs["image_path"] == inline_images[2].url
+    stages.reply("image_a", media_result(inline_images[0]))
+    stages.reply("image_b", media_result(inline_images[1]))
+    stages.reply("editor", media_result(inline_images[0]))
+    check = stages.held["vision_worker"].request.inputs[-1]["content"]
+    assert [part["text"] for part in check if part["type"] == "text"][1:] == [
+        "Image generate_2:",
+        "Image image_1:",
+    ]
+    assert [
+        part["image_url"]["url"] for part in check if part["type"] == "image_url"
+    ] == [
+        inline_images[1].url,
+        inline_images[0].url,
+    ]
+
+
+def test_exhausted_planning_is_reported_as_unprocessable(
+    controller: UMMController,
+) -> None:
+    """A planner that never produces a valid reply is HTTP 422, not a server fault."""
+    stages = FakeStages(controller, "unplannable")
+    stages.submit(OmniRequest("Draw a cat"))
+    planning = stages.held.pop("planning_worker")
+    context = controller.contexts["unplannable"]
+    assert controller.advance(replace(planning, data={"text": "not json"})) is None
+    error = controller.outbox.get_nowait().data
+    # The error crosses stage IPC as text before serving classifies it.
+    assert generation_error_status_code(RuntimeError(str(error))) == 422
+    assert f"execution_id={context.execution_id}" in str(error)
+    assert not controller.adapter.executions

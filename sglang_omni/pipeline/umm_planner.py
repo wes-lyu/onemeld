@@ -14,9 +14,11 @@ from sglang_omni.pipeline.umm_plan import (
     UMMExecutionPlan,
     UMMPlannerTurn,
     media_part,
-    turn_from_plan,
+    plan_calls,
 )
 from sglang_omni.proto.request import OmniRequest
+
+REPAIR_TEMPERATURE = 0.7
 
 SHARED_RULES = (
     "Each step selects an available action and gives an instruction describing what that model must do. "
@@ -33,12 +35,12 @@ PLAN_RULES = (
     "for the outputs the user asked for and false for intermediate work."
 )
 ITERATIVE_RULES = (
-    "You plan in turns and see each turn's results before the next. Return only JSON matching the schema. "
-    "Set final=null to run steps and observe their results. When the task is done, return final with the "
-    "step outputs to show the user in publish, in display order, and an optional short answer. Inspect "
-    "results before you rely on them, retry a step with a better instruction when its result is wrong, and "
-    "publish only the results that satisfy the request. A turn that runs steps cannot give a final answer, "
-    "but it can return final with the steps whose outputs to publish."
+    "You plan in turns. Return only JSON matching the schema. Each reply either runs steps with final=null, "
+    "or finishes with final and no steps. After steps run you see their actual results, including images, "
+    "in the next turn. Never publish or describe a result you have not seen. When the observed results "
+    "satisfy the request, finish: list the IDs of observed results to show the user in final.publish, in "
+    "display order, with an optional short answer. When a result is wrong, run a corrected step instead "
+    "and check it again."
 )
 
 
@@ -158,14 +160,34 @@ def build_planner_request(
     )
     if composition.plan_examples:
         examples = [
-            {
-                "task": example.prompt,
-                "reply": (
-                    example.plan.model_dump(mode="json")
-                    if mode == "plan"
-                    else turn_from_plan(example.plan).model_dump(mode="json")
-                ),
-            }
+            (
+                {"task": example.prompt, "reply": example.plan.model_dump(mode="json")}
+                if mode == "plan"
+                else {
+                    "task": example.prompt,
+                    "replies": [
+                        {
+                            "steps": [
+                                step.model_dump(mode="json")
+                                for step in plan_calls(example.plan)
+                            ],
+                            "final": None,
+                        },
+                        "(the results of these steps are observed here)",
+                        {
+                            "steps": [],
+                            "final": {
+                                "publish": [
+                                    step.id
+                                    for step in example.plan.steps
+                                    if step.publish
+                                ],
+                                "answer": "",
+                            },
+                        },
+                    ],
+                }
+            )
             for example in composition.plan_examples
         ]
         instruction += (
@@ -200,7 +222,7 @@ def build_planner_request(
         messages.append(
             {
                 "role": "user",
-                "content": "This is the last turn. Return final; steps you add still run before it is published.",
+                "content": "This is the last turn. Return final. Steps you add still run, and their outputs are published without being observed.",
             }
         )
     else:
@@ -221,7 +243,8 @@ def build_planner_request(
         inputs=messages,
         params={
             "max_new_tokens": max_new_tokens,
-            "temperature": 0.0,
+            # A repair samples, since a greedy repair tends to repeat the rejected reply.
+            "temperature": 0.0 if repair is None else REPAIR_TEMPERATURE,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {

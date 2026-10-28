@@ -15,7 +15,7 @@ stages:
       disable_cuda_graph: true
   generation:
     gpu: 0
-    gpu_memory_fraction: 0.45
+    gpu_memory_fraction: 0.33
     factory:
       server_args_overrides:
         dit_layerwise_offload: true
@@ -23,9 +23,10 @@ stages:
         vae_cpu_offload: true
   asr:
     gpu: 0
-    gpu_memory_fraction: 0.1
+    gpu_memory_fraction: 0.24
     factory:
-      mem_fraction_static: 0.08
+      # Measured: below 0.2 the KV pool did not fit once diffusion warmup had run.
+      mem_fraction_static: 0.2
   tts_engine:
     gpu: 0
     gpu_memory_fraction: 0.1

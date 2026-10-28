@@ -1,0 +1,28 @@
+config_cls: QwenSpeechInPipelineConfig
+model_path: Qwen/Qwen-Image-2512
+text_model_path: Qwen/Qwen2.5-VL-3B-Instruct
+asr_model_path: Qwen/Qwen3-ASR-0.6B
+stages:
+  understanding:
+    gpu: 0
+    gpu_memory_fraction: 0.22
+    engine:
+      mem_fraction_static: 0.2
+      context_length: 16384
+      max_running_requests: 1
+      attention_backend: triton
+      disable_cuda_graph: true
+  generation:
+    gpu: 0
+    gpu_memory_fraction: 0.5
+    factory:
+      server_args_overrides:
+        dit_layerwise_offload: true
+        text_encoder_cpu_offload: true
+        vae_cpu_offload: true
+  asr:
+    gpu: 0
+    gpu_memory_fraction: 0.24
+    factory:
+      # Measured: below 0.2 the KV pool did not fit once diffusion warmup had run.
+      mem_fraction_static: 0.2

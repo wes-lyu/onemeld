@@ -19,7 +19,7 @@ Composition is an adapter on the shared UMM controller. Deadlines, load shedding
 A deployment sets `execution_mode` and the `allowed_modes` a request may select with the `mode` option. Both modes share the step format, validation, protocols, artifact store, scheduling, budgets and tracing. They differ only in what the planner returns and whether it is consulted again.
 
 - `plan`: the planner returns every step before any runs, as `{"steps": [{"id", "action", "instruction", "input_refs", "publish"}]}`. Steps with `publish: true` become the output, in plan order. The planner is not consulted again.
-- `iterative`: each planner turn returns `{"steps": [...], "final": null | {"publish": [...], "answer": "..."}}`. With `final: null` the steps run and the planner sees their results in the next turn. A turn may run steps and also return `final`, naming outputs of those steps. A final answer can only follow observed results. On the last turn allowed by `max_planner_turns`, or when no steps remain, the JSON schema itself requires `final`; that turn may still run steps whose outputs it publishes.
+- `iterative`: each planner turn returns `{"steps": [...], "final": null | {"publish": [...], "answer": "..."}}`. A turn either runs steps with `final: null`, and the planner sees their results in the next turn, or finishes with `final` and no steps, publishing results it has observed. When a turn runs steps and also returns `final`, the server drops the `final` and runs the steps, so a result is never published before the planner has seen it. On the last turn allowed by `max_planner_turns`, or when no steps remain, the JSON schema itself requires `final`; that turn may still run steps, whose outputs it publishes unseen, and an answer written before their results is dropped. Plan examples are shown to an iterative planner as a run turn followed by a finishing turn.
 
 Steps reference client inputs, earlier results, and earlier steps of the same reply through `input_refs`. A step runs once every artifact it references exists and one of its capability's stages is free, so steps that do not reference each other run in parallel. Each stage runs one step of a request at a time; a capability that lists several stages spreads ready steps over them, and the remaining steps wait.
 
@@ -63,7 +63,9 @@ Each capability stage maps to a controller phase of the same name, and the plann
 
 Runtime `num_replicas` binds a request to one replica of a stage, so parallel steps of one request need distinctly named stages listed in one capability. Several stages on one GPU share it, which shows the scheduling but does not speed it up.
 
-The controller's `max_dispatches` must cover the most expensive allowed mode, `max_plan_attempts` per planner turn (`max_planner_turns` turns in iterative mode, one in plan mode) plus `max_steps`; `required_dispatches()` computes it. `max_outputs` must cover `max_steps`, plus the answer when iterative mode is allowed; `required_outputs()` computes it. `max_plan_attempts` above one lets the planner repair a rejected reply: it receives the reply and the validation error and returns a corrected one. No step runs from a rejected reply, and a failed step fails the request.
+The controller's `max_dispatches` must cover the most expensive allowed mode, `max_plan_attempts` per planner turn (`max_planner_turns` turns in iterative mode, one in plan mode) plus `max_steps`; `required_dispatches()` computes it. `max_outputs` must cover `max_steps`, plus the answer when iterative mode is allowed; `required_outputs()` computes it.
+
+Before validating a reply, the server fixes what it can without the planner: a step ID that repeats an earlier one or starts with `user_` is renamed, for example a second `generate` to `generate_2`, and each reference names the latest earlier step of that name in the reply, or else an existing artifact. `max_plan_attempts` above one lets the planner repair a rejected reply: it receives the reply and the validation error and returns a corrected one, sampled at temperature 0.7 because a greedy repair tends to repeat the rejected reply. No step runs from a rejected reply. When the attempts run out, the request fails with HTTP 422, whose message names the error, the attempt count and the `execution_id`; a failed step fails the request.
 
 ## Requests and outputs
 
@@ -71,7 +73,7 @@ The chat and `/generate` entrypoints are reused. A chat request may hold several
 
 The result is the existing ordered segment list in `choices[0].message.segments`, with published text also joined in `message.content`. Image, video and audio segments carry inline media with `kind`, `mime_type`, `size_bytes`, `sha256` and a data URL; `InlineMedia` in `sglang_omni.client.image_media` validates them. Audio arrives as a segment, not in `delta.audio`.
 
-With `trace`, `UMM composition trace` log entries record each accepted reply (`plan`), rejected reply (`plan_rejected`), dispatch with its stage and input hashes (`dispatch`), artifact (`artifact`) and replanning point (`observe`), keyed by the `execution_id` of the returned segments.
+With `trace`, `UMM composition trace` log entries record each accepted reply (`plan`), rejected reply (`plan_rejected`), server fix of a reply, with renamed IDs and dropped fields (`normalized`), dispatch with its stage and input hashes (`dispatch`), artifact (`artifact`) and replanning point (`observe`), keyed by the `execution_id` of the returned segments.
 
 ## Limits
 

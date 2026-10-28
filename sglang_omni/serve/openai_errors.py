@@ -64,6 +64,8 @@ _BAD_REQUEST_MARKERS = (
     "Native chat request rejected: ",
     "Invalid UMM request: ",
 )
+# The prefix of UMMPlanningError, which reaches serving as text.
+UNPROCESSABLE_MARKER = "UMM planning failed: "
 _BAD_REQUEST_PATTERNS = (
     re.compile(
         r"\bAuK (?:nfe|cfg_strength|sway_sampling_coef|max_seconds) is a server-level setting"
@@ -95,10 +97,13 @@ def is_bad_request_error(exc: BaseException) -> bool:
 
 
 def generation_error_status_code(exc: BaseException) -> int:
-    """Map a failure to 503 for a full queue, 400 for a caller error, else 500."""
+    """Map a failure to 503 for a full queue, 400 for a caller error, 422 for a
+    task the UMM planner could not plan, else 500."""
     if QueueFullError.matches(exc):
         return 503
     elif is_bad_request_error(exc):
         return 400
+    elif UNPROCESSABLE_MARKER in str(exc):
+        return 422
     else:
         return 500

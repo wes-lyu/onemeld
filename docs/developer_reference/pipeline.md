@@ -174,7 +174,8 @@ stream_done_to_fn `umm_stream_done_targets`, `stream_to` and `next` naming
 `output`), an `output` stage in the same process (factory
 `create_umm_output_stage`, terminal, accepting streams before its payload),
 and the phase stages, each routing back to `orchestrator` without a
-`stream_to`. The orchestrator's factory arguments set the adapter factory
+`stream_to`, or each the entry of a private chain of stages whose last stage
+routes back and whose streams stay inside the chain. The orchestrator's factory arguments set the adapter factory
 path, the phase map, and the required bounds: `max_dispatches`,
 `max_outputs`, `max_active` (which also caps the coordinator, never above the
 running+queued capacity of an engine phase stage), `max_retained_bytes`, and
@@ -182,9 +183,9 @@ running+queued capacity of an engine phase stage), `max_retained_bytes`, and
 non-positive bound, at load time. Accepted segments stream to the client in
 order through the output stage when the request streams.
 
-### Planned multi-model composition
+### Multi-model composition
 
-The controller factory also accepts an optional `composition` specification. It selects the public `UMMCompositionAdapter`, whose model-generated plans call configured capabilities and exchange typed text/image artifacts. Model packages supply stage/model bindings and capability descriptions rather than their own planner and executor. Without `composition`, existing adapters keep their original constructor and execution contract. See [UMM composition](umm_composition.md) for the configuration, plan format, native protocols and supported scope.
+The controller factory also accepts an optional `composition` specification. It selects the public `UMMCompositionAdapter`, which runs a planner model's upfront plan or iterative turns over configured capabilities and exchanges typed text, image, video and audio artifacts between them. Model packages supply stage and model bindings and capability descriptions rather than their own planner and executor. Without `composition`, existing adapters keep their original constructor and execution contract. See [UMM composition](umm_composition.md) for the modes, reply formats, native protocols and supported scope.
 
 ### Code2WavScheduler
 

@@ -24,7 +24,7 @@ from typing import ClassVar, Literal, Protocol, TypeAlias, runtime_checkable
 
 from sglang_omni.admission import QueueFullError
 from sglang_omni.config.runtime import resolve_stage_typed_kwargs
-from sglang_omni.config.schema import PipelineConfig
+from sglang_omni.config.schema import PipelineConfig, StageConfig
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.pipeline.umm_plan import COMPOSITION_ADAPTER_PATH, UMMCompositionSpec
 from sglang_omni.proto.request import OmniRequest, RoutedPayloads, StagePayload
@@ -828,13 +828,70 @@ def umm_stream_done_targets(request_id: str, payload: StagePayload) -> None:
     """
 
 
+def phase_chain_problems(
+    stages: Mapping[str, StageConfig],
+    entries: set[str],
+    controller_name: str,
+    output_name: str,
+) -> tuple[list[str], set[str]]:
+    """Check that each phase stage reaches the controller through its own chain.
+
+    A phase runs on one stage whose next is the controller, or on the entry of
+    a chain that ends there, such as a speech pipeline whose vocoder returns
+    the result. Returns the problems and the chain stages after the entries.
+    """
+    problems: list[str] = []
+    owners: dict[str, str] = {}
+    for entry in sorted(entries):
+        members = [entry]
+        while stages[members[-1]].next not in (controller_name, [controller_name]):
+            following = stages[members[-1]].next
+            target = following[0] if isinstance(following, list) else following
+            if (
+                (isinstance(following, list) and len(following) != 1)
+                or target is None
+                or target not in stages
+                or target in (controller_name, output_name)
+                or target in entries
+                or target in members
+                or stages[target].terminal
+            ):
+                problems.append(
+                    f"stages.{controller_name}.factory.phases must map each phase to a "
+                    f"stage whose next is {controller_name!r}, directly or through a "
+                    f"chain; stages.{members[-1]}.next breaks the chain from {entry!r}"
+                )
+                break
+            else:
+                members.append(target)
+        for index, name in enumerate(members):
+            owner = owners.setdefault(name, entry)
+            if not set(stages[name].stream_to) <= set(members[index + 1 :]):
+                problems.append(
+                    f"stages.{name}.stream_to must be empty or name later stages of the "
+                    f"chain from {entry!r}, since the controller streams accepted outputs"
+                )
+            elif stages[name].route_fn is not None:
+                problems.append(
+                    f"stages.{name}.route_fn must stay unset inside the chain from {entry!r}"
+                )
+            elif owner != entry:
+                problems.append(
+                    f"stages.{name} belongs to the chains from {owner!r} and {entry!r}"
+                )
+            else:
+                pass
+    return problems, set(owners) - entries
+
+
 class UMMPipelineConfig(PipelineConfig):
     """Base of pipelines whose entry stage is a UMM controller.
 
     The controller stage uses create_umm_controller, route_fn route_umm,
     stream_done_to_fn umm_stream_done_targets, stream_to the output stage,
-    and next naming the output stage and every phase stage, whose own next is
-    the controller and which streams nowhere. The output stage is terminal,
+    and next naming the output stage and every phase stage. A phase stage's next
+    is the controller, directly or through a chain whose stages stream only to
+    later stages of that chain. The output stage is terminal,
     uses create_umm_output_stage, accepts streams before its payload, and
     shares the controller's process.
     """
@@ -892,26 +949,38 @@ class UMMPipelineConfig(PipelineConfig):
                 )
             elif (
                 isinstance(factory_args.get("max_dispatches"), int)
-                and factory_args["max_dispatches"]
-                < specification.max_steps + specification.max_plan_attempts
+                and factory_args["max_dispatches"] < specification.required_dispatches()
             ):
                 raise ValueError(
-                    "composition max_dispatches must cover plan attempts and max_steps"
+                    "composition max_dispatches must cover planner attempts of every "
+                    f"allowed mode and max_steps: {specification.required_dispatches()}"
                 )
             elif (
                 isinstance(factory_args.get("max_outputs"), int)
-                and factory_args["max_outputs"] < specification.max_steps
+                and factory_args["max_outputs"] < specification.required_outputs()
             ):
-                raise ValueError("composition max_outputs must cover max_steps")
+                raise ValueError(
+                    "composition max_outputs must cover max_steps and a final answer: "
+                    f"{specification.required_outputs()}"
+                )
             else:
                 pass
         else:
             pass
         phase_targets = list(phases.values()) if isinstance(phases, Mapping) else []
         phase_stages = {name for name in phase_targets if isinstance(name, str)}
-        streaming_phase_stages = sorted(
-            name for name in phase_stages if name in stages and stages[name].stream_to
+        phases_are_stages = bool(phase_targets) and all(
+            isinstance(name, str)
+            and name in stages
+            and name not in (controller_name, output_name)
+            for name in phase_targets
         )
+        if phases_are_stages:
+            chain_problems, chain_members = phase_chain_problems(
+                stages, phase_stages, controller_name, output_name
+            )
+        else:
+            chain_problems, chain_members = [], set()
         if isinstance(controller.next, list):
             next_stages = set(controller.next)
         else:
@@ -941,14 +1010,7 @@ class UMMPipelineConfig(PipelineConfig):
                     f"{prefix}.stream_to must be [{output_name!r}]",
                 ),
                 (
-                    bool(phase_targets)
-                    and all(
-                        isinstance(name, str)
-                        and name in stages
-                        and name not in (controller_name, output_name)
-                        and stages[name].next in (controller_name, [controller_name])
-                        for name in phase_targets
-                    ),
+                    phases_are_stages,
                     f"{prefix}.factory.phases must map each phase to a stage "
                     f"whose next is {controller_name!r}",
                 ),
@@ -958,11 +1020,9 @@ class UMMPipelineConfig(PipelineConfig):
                     "factory.phases",
                 ),
                 (
-                    not streaming_phase_stages,
-                    ", ".join(
-                        f"stages.{name}.stream_to" for name in streaming_phase_stages
-                    )
-                    + " must be empty, since the controller streams accepted outputs",
+                    not next_stages & chain_members,
+                    f"{prefix}.next must not name stages inside a phase chain: "
+                    f"{sorted(next_stages & chain_members)}",
                 ),
                 (
                     factory_args.get("output_stage", output_name) == output_name,
@@ -977,7 +1037,11 @@ class UMMPipelineConfig(PipelineConfig):
                 ),
             )
             if not holds
-        ] + [f"{prefix}.factory.{problem}" for problem in limit_problems(factory_args)]
+        ]
+        problems += chain_problems
+        problems += [
+            f"{prefix}.factory.{problem}" for problem in limit_problems(factory_args)
+        ]
         if problems:
             raise ValueError("Invalid UMM pipeline. " + ". ".join(problems))
         else:

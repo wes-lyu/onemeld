@@ -9,7 +9,7 @@ from typing import Literal
 import pytest
 from PIL import Image
 
-from sglang_omni.client.image_media import InlineImage
+from sglang_omni.client.image_media import InlineImage, InlineMedia
 
 
 @pytest.mark.parametrize(
@@ -68,3 +68,25 @@ def test_inline_media_rejects_malformed_base64() -> None:
     altered["url"] = "data:image/png;base64,!invalid!"
     with pytest.raises(ValueError):
         InlineImage.model_validate(altered).encoded_image()
+
+
+@pytest.mark.parametrize(
+    "mime_type", ["image/png", "video/mp4", "audio/wav", "audio/mpeg", "audio/flac"]
+)
+def test_inline_media_round_trips_every_kind(mime_type: str) -> None:
+    content = b"media bytes"
+    media = InlineMedia.from_bytes(mime_type, content)
+    restored = InlineMedia.from_data_url(media.url)
+    assert restored == media
+    assert restored.kind == mime_type.split("/")[0]
+    assert base64.b64decode(restored.encoded_content()) == content
+
+
+def test_inline_media_rejects_mismatched_kinds() -> None:
+    media = InlineMedia.from_bytes("audio/wav", b"audio")
+    with pytest.raises(ValueError, match="cannot have MIME type"):
+        InlineMedia.model_validate({**media.model_dump(), "kind": "video"})
+    with pytest.raises(ValueError):
+        InlineImage.model_validate({**media.model_dump(), "kind": "image"})
+    with pytest.raises(ValueError, match="Unsupported"):
+        InlineMedia.from_bytes("text/plain", b"text")

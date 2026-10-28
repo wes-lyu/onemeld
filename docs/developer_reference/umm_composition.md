@@ -1,112 +1,78 @@
-# Planned multi-model composition on UMM
+# Multi-model composition on UMM
 
-The public UMM composition mode combines independently configured native model stages behind one request. A planner model generates a bounded action list from declared capabilities. The shared executor validates the list, resolves typed text/image references, dispatches its actions, and publishes only the requested outputs through the existing UMM segment protocol.
+Composition mode serves one request with several independently configured models. A deployment declares capabilities, each bound to native stages and a protocol. A planner model decides which capabilities to run, with which instructions and inputs, and which results the user sees. One shared executor validates the planner's replies, runs the steps on the bound stages, passes typed text, image, video and audio artifacts between them, and publishes the chosen outputs through the existing UMM segment protocol.
 
 ## Relation to existing UMM
 
-The original UMM controller already supports adapter-selected phases, result-dependent transitions, multiple stage bindings, bounded execution, and parallel dispatches to different stages. Independent models can already be connected by an adapter. Composition mode standardizes the planning and artifact handling that such an adapter would otherwise implement; it does not introduce dynamic routing or multi-stage execution for the first time.
+Composition is an adapter on the shared UMM controller. Deadlines, load shedding, admission, dispatch and output budgets, retained-byte accounting, cancellation, continuations and ordered segments are the controller's, unchanged. Model-specific adapters, such as those of SenseNova, LLaDA2-Uni and Cosmos3, keep their constructor and execution contract and remain the right choice for a single unified checkpoint, whose phases share engine state through context references.
 
-| Concern | Existing adapter mode | Composition mode |
+| Concern | Model adapter | Composition |
 | --- | --- | --- |
-| Next action | Model-specific adapter callbacks | Model-generated plan interpreted by a shared adapter |
-| Model bindings | Phase-to-stage configuration | Capability-to-stage configuration plus declared native protocols |
-| Intermediate results | Adapter-owned state and optional engine-context references | Shared named text/image artifacts with validated dependencies |
-| Output visibility | Adapter constructs outputs | Plan declares which artifacts to publish |
-| Planning errors | Adapter implements its own handling | Shared structural validation and optional bounded model repair |
-| Scheduling and serving | Existing controller, budgets, cancellation, continuations and segments | Reuses the same mechanisms |
-| Execution strategy | Adapter can branch after results or dispatch to different stages in parallel | One accepted plan, executed sequentially |
+| Next action | Adapter code | Planner model reply, validated against declared capabilities |
+| Model bindings | Phase-to-stage map | Capability-to-stages map with a native protocol |
+| Intermediate results | Adapter state, optional engine context references | Named text, image, video and audio artifacts |
+| Parallel work | Adapter dispatches to distinct stages | Steps whose inputs are ready run on free capability stages |
+| Output visibility | Adapter builds outputs | The planner's final publish list, in order |
 
-This implementation extends the available configuration modes while preserving adapter mode. It does not merge checkpoints, train a joint model, or add observation-driven replanning to the composition executor.
+## Execution modes
 
-## Public interfaces
+A deployment sets `execution_mode` and the `allowed_modes` a request may select with the `mode` option. Both modes share the step format, validation, protocols, artifact store, scheduling, budgets and tracing. They differ only in what the planner returns and whether it is consulted again.
 
-- `UMMCapability` in `sglang_omni.pipeline.umm_plan` binds a logical action name to a stage and a native request/response protocol. It declares the artifact kinds that action accepts, a description for the planner, and native parameter defaults.
-- `UMMCompositionSpec` declares the planner stage, capabilities, plan/image limits, token limits, inline-image size limit, and opt-in execution tracing. Its `phases` property constructs the required UMM phase map.
-- `UMMExecutionPlan` and `UMMPlanStep` are the shared model-output format. Steps name capabilities rather than model packages or Python factories.
-- `UMMPlanExample` supplies an optional prompt/plan example through `composition.plan_examples`. Examples are validated against the same capability bindings and bounds as real plans.
-- `UMMCompositionAdapter` in `sglang_omni.pipeline.umm_composition` implements the existing adapter protocol for every such configuration. Model packages do not supply their own planning or execution adapter.
+- `plan`: the planner returns every step before any runs, as `{"steps": [{"id", "action", "instruction", "input_refs", "publish"}]}`. Steps with `publish: true` become the output, in plan order. The planner is not consulted again.
+- `iterative`: each planner turn returns `{"steps": [...], "final": null | {"publish": [...], "answer": "..."}}`. With `final: null` the steps run and the planner sees their results in the next turn. A turn may run steps and also return `final`, naming outputs of those steps. A final answer can only follow observed results. On the last turn allowed by `max_planner_turns`, or when no steps remain, the JSON schema itself requires `final`; that turn may still run steps whose outputs it publishes.
 
-`create_umm_controller` accepts an optional `composition` specification, either a validated object or a JSON-compatible mapping. With it, the factory selects the public executor. Without it, `adapter` retains its original import-path and one-argument constructor contract. A model-specific adapter and composition mode cannot be selected together.
+Steps reference client inputs, earlier results, and earlier steps of the same reply through `input_refs`. A step runs once every artifact it references exists and one of its capability's stages is free, so steps that do not reference each other run in parallel. Each stage runs one step of a request at a time; a capability that lists several stages spreads ready steps over them, and the remaining steps wait.
 
-## Declare capabilities
+The executor publishes the longest completed prefix of the final publish list after each result. In plan mode a parallel plan therefore still returns its outputs in plan order. In iterative mode nothing is published until the planner returns `final`, so a retried result the planner rejected is never shown. A text `answer` follows the published artifacts.
 
-For example, an existing pipeline can construct its controller arguments as follows:
+## Observations
+
+In iterative mode the planner's history holds its accepted replies, each followed by an observation of the results that reply produced: a JSON summary of each artifact with its ID, kind, action, SHA-256, size and text cut to `observation_text_bytes`, then each media artifact whose kind is in `planner_media_kinds` attached once as a content part. Media of other kinds is described only; a planner that cannot hear asks for a transcription step. The observation of the latest turn ends with the remaining steps, turns and media budget.
+
+## Capabilities and protocols
 
 ```python
-from sglang_omni.config.schema import FactoryArgs
 from sglang_omni.pipeline.umm_plan import UMMCapability, UMMCompositionSpec
 
 composition = UMMCompositionSpec(
-    planner_stage="planner_model",
+    planner_stage="understanding",
     capabilities={
-        "paint": UMMCapability(
-            stage="image_model",
-            protocol="native_image",
-            description="Create exactly one image from a visual description.",
-            input_kinds=["text"],
-            parameters={"width": 512, "height": 512, "num_inference_steps": 20},
-        ),
-        "inspect": UMMCapability(
-            stage="vision_model",
-            protocol="native_chat",
-            description="Answer questions or inspect the supplied images.",
-            input_kinds=["text", "image"],
-            parameters={"temperature": 0.0},
-        ),
+        "respond": UMMCapability(stages=["understanding"], protocol="native_chat", description="Answer questions or inspect referenced media.", input_kinds=["text", "image", "video"]),
+        "paint": UMMCapability(stages=["image_a", "image_b"], protocol="native_image", description="Generate exactly one image.", input_kinds=["text"], parameters={"width": 512, "height": 512}),
+        "transcribe": UMMCapability(stages=["asr"], protocol="asr", description="Transcribe one recording.", input_kinds=["audio"]),
+        "speak": UMMCapability(stages=["tts_preprocessing"], protocol="tts", description="Read the referenced text aloud.", input_kinds=["text"], speech={"voice": "Vivian"}),
     },
-)
-controller_factory = FactoryArgs(
-    composition=composition.model_dump(mode="json"),
-    phases=composition.phases,
-    max_dispatches=composition.max_steps + composition.max_plan_attempts,
-    max_outputs=composition.max_steps,
-    max_active=1,
-    max_retained_bytes=128 * 1024 * 1024,
-    timeout_s=1200.0,
+    execution_mode="iterative",
+    allowed_modes=["iterative", "plan"],
 )
 ```
 
-Use these arguments on the ordinary `create_umm_controller` stage of a `UMMPipelineConfig`. Declare each bound stage on that pipeline, with its own model path, native factory and placement, and route its result back to the controller. Planner and execution capabilities can share a stage or use different stages. The existing UMM topology, admission and process-placement validation still applies. Configuration loading also rejects inconsistent composition/phase bindings and a dispatch or output budget smaller than the declared plan bound.
+| Protocol | Accepts | Produces | Native request | Native result |
+| --- | --- | --- | --- | --- |
+| `native_chat` | text, image, video, audio | text | Chat messages; media references as `image_url`, `video_url` and `audio_url` data URL parts | `text`, `finish_reason` |
+| `native_image` | text, up to 3 images | image | Generation inputs with `prompt`; image references in `image_path`, which edits them | One inline image in `media` |
+| `native_video` | text, up to 1 image | video | Generation inputs with `prompt`; an image reference in `image_path` | One inline video in `media` |
+| `asr` | exactly 1 audio | text | `{"audio_bytes": ...}` | `text` |
+| `tts` | text | audio | The referenced text, or the instruction; `metadata.tts_params` from `speech` | A float32 waveform, returned as WAV |
 
-Capability names are configuration values. A configuration can use `paint` and `inspect`, or different names, without changing the executor. The planner's JSON schema enumerates exactly the declared names. Supported protocols are currently `native_chat`, using the native SRT chat stage and producing text, and `native_image`, using the native generation stage and producing one inline image. Image editing, audio and video need additional protocol implementations; declaring a name alone does not add those model capabilities.
+`parameters` become native request fields or sampling parameters, except the fields each protocol owns, such as `prompt`, `image_path` and `messages`. Referenced text is appended to generation prompts. Client `width` and `height` apply to text-to-image and text-to-video steps; an edit or image-to-video step keeps its source size unless the capability sets one. Image and video steps take the client seed plus the step's position among accepted generation steps, so seeds do not depend on completion order. The stage remains responsible for its model, weights and processor; a different wire format needs a stage or protocol change.
 
-## Native stage contracts
+## Pipeline configuration
 
-| Protocol | Dispatched request | Returned stage data |
-| --- | --- | --- |
-| `native_chat` | `OmniRequest.inputs` contains chat messages with text and referenced image URLs; sampling values go in `params` | `text`, optionally `finish_reason` |
-| `native_image` | `OmniRequest.inputs` contains `prompt`, native generation parameters and `num_outputs_per_prompt=1` | `media` containing exactly one validated inline image |
+Each capability stage maps to a controller phase of the same name, and the planner stage to the `plan` phase; `UMMCompositionSpec.phases` builds this map. A phase stage returns its result to the controller directly, or is the entry of a chain whose last stage does. A chain lets a multi-stage pipeline, such as the speech pipeline `tts_preprocessing → tts_engine → vocoder`, be one capability. Configuration loading checks that each chain is linear and acyclic, ends at the controller, contains no terminal, routed or shared stage, and streams only to later stages of the same chain, and that the controller's `next` names chain entries but no stage inside a chain.
 
-The stage remains responsible for its model architecture, weights, tokenizer or processor, and native inference. Model families can differ as long as their stages implement these contracts. A compatible replacement mainly changes model/stage bindings and capability configuration. An unsupported architecture still needs backend implementation; a different wire format needs stage or protocol adaptation. The composition executor does not translate arbitrary tensors, latent representations or model-specific responses automatically.
+Runtime `num_replicas` binds a request to one replica of a stage, so parallel steps of one request need distinctly named stages listed in one capability. Several stages on one GPU share it, which shows the scheduling but does not speed it up.
 
-## Plans and typed artifacts
-
-```json
-{
-  "steps": [
-    {"id": "description", "action": "inspect", "instruction": "Write a concise visual description of the requested scene.", "input_refs": [], "publish": false},
-    {"id": "photo", "action": "paint", "instruction": "Generate a photograph matching the supplied description.", "input_refs": ["description"], "publish": true},
-    {"id": "answer", "action": "inspect", "instruction": "Check the image against the description.", "input_refs": ["description", "photo"], "publish": true}
-  ]
-}
-```
-
-Each completed step produces one artifact named by its unique ID. Artifact kinds follow the chosen capability's protocol. References must point to available artifacts from earlier steps and their kinds must be accepted by the consuming capability. Plans with unknown capabilities, duplicate IDs, forward references, incompatible kinds, no published outputs, or excessive step/image counts are rejected before action execution. A truncated planner response is also rejected; the runtime never substitutes a fixed workflow.
-
-`max_plan_attempts` defaults to one. Set it to two or three to allow bounded model-driven repair: the planner receives its rejected response and the validation error, then generates a corrected complete plan. Each attempt consumes a controller dispatch. Exhausting the attempt or dispatch budget fails the request. No action runs until a plan passes validation.
-
-Optional `plan_examples` become labeled example data in the planner's system instructions, separate from the actual user message. Their actions are never dispatched and their artifacts are never created. They let a deployment demonstrate capability selection and private dependencies without implementing a custom adapter. They do not establish semantic correctness: a structurally valid plan can still misunderstand the user's task. Evaluate planning quality separately from protocol and execution correctness.
-
-`publish` controls delivery to the user, not availability to later actions. Private text can condition an image prompt without appearing as a text segment. Chat actions receive the explicitly referenced text and/or actual inline images. The native image protocol appends referenced text to the planned visual instruction. The shared executor retains all needed artifacts, counts their bytes through `usage`, and releases them through the controller's existing close path on completion, cancellation, failure or expiry. Action execution failures are not retried automatically.
-
-The first implementation plans once and executes sequentially. It retains the controller's one-in-flight-phase-per-stage-per-request rule. It does not add iterative replanning, cross-request memory, arbitrary worker creation, or cross-model tensor/KV transfer.
+The controller's `max_dispatches` must cover the most expensive allowed mode, `max_plan_attempts` per planner turn (`max_planner_turns` turns in iterative mode, one in plan mode) plus `max_steps`; `required_dispatches()` computes it. `max_outputs` must cover `max_steps`, plus the answer when iterative mode is allowed; `required_outputs()` computes it. `max_plan_attempts` above one lets the planner repair a rejected reply: it receives the reply and the validation error and returns a corrected one. No step runs from a rejected reply, and a failed step fails the request.
 
 ## Requests and outputs
 
-Existing HTTP and SDK entrypoints are reused. The initial composition request accepts a string task, or a single user chat message with string content. Top-level sampling seed and completion limit are forwarded; image dimensions and steps can be supplied under `stage_params.<controller_stage>`. With `/generate`, use `metadata.composition` for these controls. An optional base64 PNG there is available as the `input_image` artifact to the planner and consuming actions.
+The chat and `/generate` entrypoints are reused. A chat request may hold several messages with `system`, `user` and `assistant` roles, whose content is a string or parts of type `text`, `image_url`, `video_url`, `audio_url` and `input_audio`. Media must be inline data URLs, given as `{"url": ...}` or as a string, or base64 WAV or MP3 data for `input_audio`. Each media part becomes an input artifact `user_image_1`, `user_video_1`, `user_audio_1` and so on, within `max_input_media` and `max_inline_media_bytes`. Options such as `mode`, `width`, `height`, `steps`, `seed` and `planning_max_new_tokens` go under `stage_params.<controller stage>`; a `/generate` string task takes them in `metadata.composition`, where a base64 PNG in `image_base64` becomes the `input_image` artifact.
 
-The controller returns the existing ordered segments. A Chat Completion includes them in `choices[0].message.segments` and joins published text in `message.content`; image display requires Omni's existing segment extension. Planner output and private artifacts are not response segments. Streaming retains the existing segment behavior and does not stream individual planner or response tokens.
+The result is the existing ordered segment list in `choices[0].message.segments`, with published text also joined in `message.content`. Image, video and audio segments carry inline media with `kind`, `mime_type`, `size_bytes`, `sha256` and a data URL; `InlineMedia` in `sglang_omni.client.image_media` validates them. Audio arrives as a segment, not in `delta.audio`.
 
-Enable `composition.trace` only when execution inspection is desired. `UMM composition trace` JSON log entries contain accepted plans, rejected planner responses and validation errors, and each actual action's stage, input references and artifact hashes. Private text is represented by its hash in artifact events. Match `execution_id` to returned segments to inspect the execution without exposing private artifacts as user output.
+With `trace`, `UMM composition trace` log entries record each accepted reply (`plan`), rejected reply (`plan_rejected`), dispatch with its stage and input hashes (`dispatch`), artifact (`artifact`) and replanning point (`observe`), keyed by the `execution_id` of the returned segments.
 
-The [Qwen example](../../examples/qwen_umm/README.md) supplies model paths, native stages and a capability configuration. Its model package contains configuration only; the planner schema and execution logic are public UMM components.
+## Limits
+
+The planner decides the work, so a request's length is not known when it is admitted; `max_steps`, `max_planner_turns`, the per-kind media limits and the controller deadline bound it. Steps exchange text and inline media rather than engine state, so a step re-encodes the media it reads. Phases do not stream: a step's result is complete before later steps see it. ASR steps take one clip; long recordings need splitting before the request.

@@ -1,99 +1,80 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared planning and native stage execution for independent model compositions."""
+"""Planned and iterative execution of independent model compositions on UMM."""
 
-import hashlib
 import json
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import JsonValue
 
-from sglang_omni.client.image_media import InlineImage
 from sglang_omni.pipeline.umm import (
     CloseReason,
     UMMContext,
+    UMMDispatch,
     UMMOutput,
     UMMRequestError,
     UMMStep,
 )
 from sglang_omni.pipeline.umm_plan import (
-    INPUT_IMAGE_ID,
     PLAN_PHASE,
     ArtifactKind,
+    UMMArtifact,
     UMMCompositionSpec,
     UMMExecutionPlan,
-    UMMPlanRepair,
-    build_planning_request,
+    UMMFinal,
+    UMMPlannerTurn,
+    UMMStepCall,
+    turn_from_plan,
 )
-from sglang_omni.proto.request import OmniRequest
+from sglang_omni.pipeline.umm_planner import (
+    PlannerBudget,
+    PlannerTurnRecord,
+    UMMPlanRepair,
+    build_planner_request,
+)
+from sglang_omni.pipeline.umm_protocols import (
+    NativeTextResult,
+    step_artifact,
+    step_request,
+)
+from sglang_omni.pipeline.umm_task import ClientTask, parse_task
 
 logger = logging.getLogger(__name__)
 
-
-class CompositionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    prompt: str = Field(min_length=1, max_length=4096)
-    image_base64: str | None = None
-    max_new_tokens: int | None = Field(default=None, ge=1)
-    planning_max_new_tokens: int | None = Field(default=None, ge=256)
-    width: int | None = Field(default=None, ge=16, multiple_of=16)
-    height: int | None = Field(default=None, ge=16, multiple_of=16)
-    steps: int | None = Field(default=None, ge=1)
-    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
+SEEDED_PROTOCOLS = ("native_image", "native_video")
+TraceEvent = Literal["plan", "plan_rejected", "dispatch", "artifact", "observe"]
 
 
-class CompositionMessage(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    role: Literal["user"]
-    content: str
-
-
-class CompositionChatInput(BaseModel):
-    messages: list[CompositionMessage] = Field(min_length=1, max_length=1)
-
-
-class NativeTextResult(BaseModel):
-    text: str = Field(min_length=1)
-    finish_reason: str = "stop"
-
-
-class NativeImage(InlineImage):
-    model_config = ConfigDict(extra="ignore", strict=True)
-
-
-class NativeImageResult(BaseModel):
-    media: list[NativeImage] = Field(min_length=1, max_length=1)
-
-
-@dataclass(kw_only=True)
-class UMMArtifact:
-    value: str | InlineImage
-
-    @property
-    def kind(self) -> ArtifactKind:
-        return "text" if isinstance(self.value, str) else "image"
-
-    @property
-    def sha256(self) -> str:
-        return (
-            hashlib.sha256(self.value.encode("utf-8")).hexdigest()
-            if isinstance(self.value, str)
-            else self.value.sha256
-        )
+@dataclass(frozen=True, kw_only=True)
+class ScheduledStep:
+    step: UMMStepCall
+    seed_offset: int
 
 
 @dataclass(kw_only=True)
 class CompositionExecution:
-    request: CompositionRequest
-    plan: UMMExecutionPlan | None = None
-    step_index: int = 0
-    generated_images: int = 0
+    task: ClientTask
+    artifacts: dict[str, UMMArtifact]
+    turns: list[PlannerTurnRecord] = field(default_factory=list)
+    pending: list[ScheduledStep] = field(default_factory=list)
+    # The step each capability stage runs; a stage runs one phase per request.
+    in_flight: dict[str, ScheduledStep] = field(default_factory=dict)
+    final: UMMFinal | None = None
+    published: int = 0
+    accepted_steps: int = 0
+    seeded_steps: int = 0
     plan_attempts: int = 0
     repair: UMMPlanRepair | None = None
-    artifacts: dict[str, UMMArtifact] = field(default_factory=dict)
+
+
+def generated_kinds(execution: CompositionExecution) -> Counter[ArtifactKind]:
+    return Counter(
+        artifact.kind
+        for artifact in execution.artifacts.values()
+        if artifact.action is not None
+    )
 
 
 class UMMCompositionAdapter:
@@ -108,7 +89,7 @@ class UMMCompositionAdapter:
     def emit_trace(
         self,
         context: UMMContext,
-        event: Literal["plan", "plan_rejected", "dispatch", "artifact"],
+        event: TraceEvent,
         details: dict[str, JsonValue],
     ) -> None:
         if self.composition.trace:
@@ -121,259 +102,275 @@ class UMMCompositionAdapter:
 
     def start(self, context: UMMContext) -> UMMStep:
         try:
-            if isinstance(context.request.inputs, str):
-                prompt = context.request.inputs
-                options = context.request.metadata.get("composition", {})
-            else:
-                chat = CompositionChatInput.model_validate(
-                    {"messages": context.request.inputs}
-                )
-                prompt = chat.messages[0].content
-                parameters = context.request.params.get("stage_params", {})
-                if not isinstance(parameters, dict):
-                    raise ValueError("stage_params must be an object")
-                else:
-                    options = parameters.get(self.stage_name, {})
-            if not isinstance(options, dict):
-                raise ValueError("Composition options must be an object")
-            else:
-                options = dict(options)
-            for name in ("seed", "max_new_tokens"):
-                value = context.request.params.get(name)
-                if value is not None:
-                    options[name] = value
-                else:
-                    pass
-            request = CompositionRequest.model_validate({**options, "prompt": prompt})
-            execution = CompositionExecution(request=request)
-            if request.image_base64 is not None:
-                if (
-                    len(request.image_base64)
-                    > 2 * self.composition.max_inline_image_bytes
-                ):
-                    raise ValueError("Input image exceeds the composition byte limit")
-                else:
-                    image = InlineImage.from_png(request.image_base64)
-                if image.size_bytes > self.composition.max_inline_image_bytes:
-                    raise ValueError("Input image exceeds the composition byte limit")
-                else:
-                    execution.artifacts[INPUT_IMAGE_ID] = UMMArtifact(value=image)
-            else:
-                pass
+            task = parse_task(context.request, self.composition, self.stage_name)
         except ValueError as error:
             raise UMMRequestError(str(error)) from error
-        self.executions[context.execution_id] = execution
-        return self.planning_step(context)
+        self.executions[context.execution_id] = CompositionExecution(
+            task=task, artifacts=dict(task.artifacts)
+        )
+        return self.planner_step(context, ())
 
-    def planning_step(self, context: UMMContext) -> UMMStep:
+    def budget(self, execution: CompositionExecution) -> PlannerBudget:
+        composition = self.composition
+        generated = generated_kinds(execution)
+        turns = (
+            composition.max_planner_turns if execution.task.mode == "iterative" else 1
+        )
+        return PlannerBudget(
+            remaining_steps=composition.max_steps - execution.accepted_steps,
+            remaining_turns=turns - len(execution.turns),
+            remaining_media={
+                kind: limit - generated[kind]
+                for kind, limit in composition.media_limits.items()
+            },
+        )
+
+    def planner_step(
+        self, context: UMMContext, outputs: tuple[UMMOutput, ...]
+    ) -> UMMStep:
         execution = self.executions[context.execution_id]
-        images = [
-            artifact.value
-            for artifact in execution.artifacts.values()
-            if isinstance(artifact.value, InlineImage)
-        ]
         return UMMStep(
             phase=PLAN_PHASE,
-            request=build_planning_request(
+            request=build_planner_request(
                 self.composition,
-                execution.request.prompt,
-                images,
-                execution.request.planning_max_new_tokens
+                execution.task.mode,
+                execution.task.content,
+                execution.turns,
+                execution.artifacts,
+                self.budget(execution),
+                execution.task.options.planning_max_new_tokens
                 or self.composition.planning_max_new_tokens,
                 execution.repair,
             ),
+            outputs=outputs,
         )
-
-    def next_step(self, context: UMMContext, outputs: tuple[UMMOutput, ...]) -> UMMStep:
-        execution = self.executions[context.execution_id]
-        assert execution.plan is not None
-        if execution.step_index == len(execution.plan.steps):
-            return UMMStep(outputs=outputs)
-        else:
-            step = execution.plan.steps[execution.step_index]
-        capability = self.composition.capabilities[step.action]
-        request = execution.request
-        if capability.protocol == "native_image":
-            prompt = step.instruction
-            for reference in step.input_refs:
-                value = execution.artifacts[reference].value
-                assert isinstance(value, str)
-                prompt += f"\nContext {reference}: {value}"
-            inputs = dict(capability.parameters)
-            for name, value in (
-                ("width", request.width),
-                ("height", request.height),
-                ("num_inference_steps", request.steps),
-            ):
-                if value is not None:
-                    inputs[name] = value
-                else:
-                    pass
-            seed = request.seed if request.seed is not None else inputs.get("seed")
-            if seed is None:
-                pass
-            elif type(seed) is not int:
-                raise ValueError("Image seed must be an integer")
-            else:
-                inputs["seed"] = (seed + execution.generated_images) % (2**63)
-            inputs.update(prompt=prompt, num_outputs_per_prompt=1)
-            native_request = OmniRequest(inputs=inputs)
-        else:
-            content: list[dict[str, str | dict[str, str]]] = [
-                {
-                    "type": "text",
-                    "text": f"User request: {request.prompt}\nTask for this step: {step.instruction}",
-                }
-            ]
-            for reference in step.input_refs:
-                value = execution.artifacts[reference].value
-                if isinstance(value, str):
-                    content.append(
-                        {"type": "text", "text": f"Text {reference}: {value}"}
-                    )
-                else:
-                    content.extend(
-                        [
-                            {"type": "text", "text": f"Image {reference}:"},
-                            {"type": "image_url", "image_url": {"url": value.url}},
-                        ]
-                    )
-            native_request = OmniRequest(
-                inputs=[
-                    {
-                        "role": "system",
-                        "content": "Complete the assigned step in the user's language. Inspect supplied images when present and ground comparisons in visible details. Follow the requested answer format.",
-                    },
-                    {"role": "user", "content": content},
-                ],
-                params={
-                    **capability.parameters,
-                    "max_new_tokens": request.max_new_tokens
-                    or self.composition.response_max_new_tokens,
-                },
-            )
-        self.emit_trace(
-            context,
-            "dispatch",
-            {
-                "step_id": step.id,
-                "action": step.action,
-                "stage": capability.stage,
-                "input_refs": step.input_refs,
-                "publish": step.publish,
-                "input_artifacts": [
-                    {
-                        "id": reference,
-                        "kind": execution.artifacts[reference].kind,
-                        "sha256": execution.artifacts[reference].sha256,
-                    }
-                    for reference in step.input_refs
-                ],
-                "image_sha256": [
-                    execution.artifacts[reference].value.sha256
-                    for reference in step.input_refs
-                    if isinstance(execution.artifacts[reference].value, InlineImage)
-                ],
-            },
-        )
-        return UMMStep(phase=step.action, request=native_request, outputs=outputs)
 
     def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
         execution = self.executions[context.execution_id]
         if phase == PLAN_PHASE:
+            return self.accept_reply(context, result)
+        else:
+            scheduled = execution.in_flight.pop(phase, None)
+        if scheduled is None:
+            raise ValueError(f"Unexpected composition phase {phase!r}")
+        else:
+            step = scheduled.step
+        artifact = step_artifact(
+            self.composition.capabilities[step.action],
+            step,
+            result,
+            self.composition.max_inline_media_bytes,
+        )
+        execution.artifacts[step.id] = artifact
+        execution.turns[-1].observed.append(step.id)
+        self.emit_trace(
+            context,
+            "artifact",
+            {
+                "step_id": step.id,
+                "stage": phase,
+                "kind": artifact.kind,
+                "sha256": artifact.sha256,
+            },
+        )
+        return self.schedule(context)
+
+    def accept_reply(self, context: UMMContext, result: object) -> UMMStep:
+        """Validate a planner reply, queue its steps and record its final output."""
+        execution = self.executions[context.execution_id]
+        composition = self.composition
+        reply_text = (
+            result["text"]
+            if isinstance(result, dict) and isinstance(result.get("text"), str)
+            else ""
+        )
+        budget = self.budget(execution)
+        execution.plan_attempts += 1
+        try:
             response = NativeTextResult.model_validate(result)
-            execution.plan_attempts += 1
-            try:
-                if response.finish_reason != "stop":
-                    raise ValueError("Planning did not finish; refusing a partial plan")
-                else:
-                    plan = UMMExecutionPlan.model_validate_json(response.text)
-                self.composition.validate_plan(
-                    plan,
-                    {
-                        name: artifact.kind
-                        for name, artifact in execution.artifacts.items()
-                    },
+            if response.finish_reason != "stop":
+                raise ValueError("Planning did not finish; refusing a partial reply")
+            elif execution.task.mode == "plan":
+                reply = turn_from_plan(
+                    UMMExecutionPlan.model_validate_json(response.text)
                 )
-            except ValueError as error:
-                self.emit_trace(
-                    context,
-                    "plan_rejected",
-                    {
-                        "response": response.text,
-                        "error": str(error),
-                        "attempt": execution.plan_attempts,
-                    },
-                )
-                if (
-                    execution.plan_attempts < self.composition.max_plan_attempts
-                    and context.remaining_dispatches >= 2
-                ):
-                    execution.repair = UMMPlanRepair(
-                        response=response.text, error=str(error)
-                    )
-                    return self.planning_step(context)
-                else:
-                    raise
-            if len(plan.steps) > context.remaining_dispatches:
-                raise ValueError("Composition plan exceeds the UMM dispatch budget")
             else:
-                execution.plan = plan
-                execution.repair = None
+                reply = UMMPlannerTurn.model_validate_json(response.text)
+            composition.validate_steps(
+                reply.steps,
+                {name: artifact.kind for name, artifact in execution.artifacts.items()},
+                generated_kinds(execution),
+                budget.remaining_steps,
+            )
+            if reply.final is not None:
+                composition.validate_final(
+                    reply.final,
+                    {
+                        name
+                        for name, artifact in execution.artifacts.items()
+                        if artifact.action is not None
+                    }
+                    | {step.id for step in reply.steps},
+                )
+            elif budget.is_last_turn:
+                raise ValueError("The last planner turn must return final")
+            else:
+                pass
+            dispatches = len(reply.steps) + (reply.final is None)
+            if dispatches > context.remaining_dispatches:
+                raise ValueError("Composition steps exceed the UMM dispatch budget")
+            else:
+                pass
+        except ValueError as error:
             self.emit_trace(
                 context,
-                "plan",
+                "plan_rejected",
                 {
-                    "task_sha256": hashlib.sha256(
-                        execution.request.prompt.encode("utf-8")
-                    ).hexdigest(),
-                    "plan": plan.model_dump(mode="json"),
+                    "response": reply_text,
+                    "error": str(error),
+                    "attempt": execution.plan_attempts,
                 },
             )
-            return self.next_step(context, ())
-        else:
-            assert execution.plan is not None
-            step = execution.plan.steps[execution.step_index]
-        if phase != step.action:
-            raise ValueError(
-                f"Unexpected phase {phase!r} for planned action {step.action!r}"
-            )
-        else:
-            capability = self.composition.capabilities[step.action]
-        if capability.protocol == "native_image":
-            image = NativeImageResult.model_validate(result).media[0]
-            if image.size_bytes > self.composition.max_inline_image_bytes:
-                raise ValueError("Generated image exceeds the composition byte limit")
+            if (
+                execution.plan_attempts < composition.max_plan_attempts
+                and context.remaining_dispatches >= 1
+            ):
+                execution.repair = UMMPlanRepair(response=reply_text, error=str(error))
+                return self.planner_step(context, ())
             else:
-                image.encoded_image()
-            artifact = UMMArtifact(value=image)
-            execution.generated_images += 1
-            output = UMMOutput("image", image.model_dump())
-            self.emit_trace(
-                context,
-                "artifact",
-                {"step_id": step.id, "kind": "image", "sha256": image.sha256},
+                raise
+        for step in reply.steps:
+            seeded = composition.capabilities[step.action].protocol in SEEDED_PROTOCOLS
+            execution.pending.append(
+                ScheduledStep(step=step, seed_offset=execution.seeded_steps)
             )
+            execution.seeded_steps += seeded
+        execution.accepted_steps += len(reply.steps)
+        execution.turns.append(PlannerTurnRecord(response=response.text))
+        execution.final = reply.final
+        execution.plan_attempts = 0
+        execution.repair = None
+        self.emit_trace(
+            context,
+            "plan",
+            {
+                "mode": execution.task.mode,
+                "turn": len(execution.turns),
+                "reply": reply.model_dump(mode="json"),
+            },
+        )
+        return self.schedule(context)
+
+    def schedule(self, context: UMMContext) -> UMMStep:
+        """Dispatch ready steps to free stages, then publish, wait, finish or replan."""
+        execution = self.executions[context.execution_id]
+        composition = self.composition
+        dispatches: list[UMMDispatch] = []
+        waiting: list[ScheduledStep] = []
+        for scheduled in execution.pending:
+            step = scheduled.step
+            capability = composition.capabilities[step.action]
+            stage = (
+                next(
+                    (
+                        name
+                        for name in capability.stages
+                        if name not in execution.in_flight
+                    ),
+                    None,
+                )
+                if set(step.input_refs) <= execution.artifacts.keys()
+                else None
+            )
+            if stage is None:
+                waiting.append(scheduled)
+            else:
+                dispatches.append(
+                    UMMDispatch(
+                        phase=stage,
+                        request=step_request(
+                            capability,
+                            step,
+                            execution.artifacts,
+                            execution.task.options,
+                            execution.task.text,
+                            scheduled.seed_offset,
+                            execution.task.options.max_new_tokens
+                            or composition.response_max_new_tokens,
+                        ),
+                    )
+                )
+                execution.in_flight[stage] = scheduled
+                self.emit_trace(
+                    context,
+                    "dispatch",
+                    {
+                        "step_id": step.id,
+                        "action": step.action,
+                        "stage": stage,
+                        "input_artifacts": [
+                            {
+                                "id": reference,
+                                "kind": execution.artifacts[reference].kind,
+                                "sha256": execution.artifacts[reference].sha256,
+                            }
+                            for reference in step.input_refs
+                        ],
+                    },
+                )
+        execution.pending = waiting
+        outputs = self.release(execution)
+        if dispatches:
+            return UMMStep(outputs=outputs, dispatches=tuple(dispatches))
+        elif execution.in_flight:
+            return UMMStep(outputs=outputs)
+        elif execution.final is not None:
+            assert not execution.pending, "an idle request has only ready steps"
+            assert execution.published == len(execution.final.publish)
+            answer = (
+                (UMMOutput("text", execution.final.answer),)
+                if execution.final.answer
+                else ()
+            )
+            return UMMStep(outputs=outputs + answer)
         else:
-            response = NativeTextResult.model_validate(result)
-            artifact = UMMArtifact(value=response.text)
-            output = UMMOutput("text", response.text)
+            assert execution.task.mode == "iterative" and not execution.pending
             self.emit_trace(
                 context,
-                "artifact",
-                {"step_id": step.id, "kind": "text", "sha256": artifact.sha256},
+                "observe",
+                {
+                    "turn": len(execution.turns),
+                    "observed": list(execution.turns[-1].observed),
+                },
             )
-        execution.artifacts[step.id] = artifact
-        execution.step_index += 1
-        return self.next_step(context, (output,) if step.publish else ())
+            return self.planner_step(context, outputs)
+
+    def release(self, execution: CompositionExecution) -> tuple[UMMOutput, ...]:
+        """Publish the completed prefix of the final output list, in its order."""
+        if execution.final is None:
+            return ()
+        else:
+            publish = execution.final.publish
+        outputs: list[UMMOutput] = []
+        while (
+            execution.published < len(publish)
+            and publish[execution.published] in execution.artifacts
+        ):
+            value = execution.artifacts[publish[execution.published]].value
+            outputs.append(
+                UMMOutput("text", value)
+                if isinstance(value, str)
+                else UMMOutput(value.kind, value.model_dump())
+            )
+            execution.published += 1
+        return tuple(outputs)
 
     def usage(self, context: UMMContext) -> int:
         execution = self.executions[context.execution_id]
-        retained = len(execution.request.model_dump_json().encode("utf-8"))
-        if execution.plan is not None:
-            retained += len(execution.plan.model_dump_json().encode("utf-8"))
-        else:
-            pass
+        retained = len(execution.task.options.model_dump_json().encode("utf-8")) + len(
+            execution.task.text.encode("utf-8")
+        )
+        retained += sum(len(turn.response.encode("utf-8")) for turn in execution.turns)
         if execution.repair is not None:
             retained += len(execution.repair.response.encode("utf-8")) + len(
                 execution.repair.error.encode("utf-8")
@@ -381,12 +378,15 @@ class UMMCompositionAdapter:
         else:
             pass
         for artifact in execution.artifacts.values():
+            # A media artifact is held as its data URL, which dominates its size.
             retained += (
                 len(artifact.value.encode("utf-8"))
                 if isinstance(artifact.value, str)
-                else len(artifact.value.model_dump_json().encode("utf-8"))
+                else len(artifact.value.url)
             )
-        return retained + 2 * self.composition.max_inline_image_bytes
+        # Room for the largest result each running step, or the planner, can return.
+        running = max(1, len(execution.in_flight))
+        return retained + 2 * self.composition.max_inline_media_bytes * running
 
     def close(self, context: UMMContext, reason: CloseReason) -> None:
         self.executions.pop(context.execution_id, None)

@@ -555,7 +555,7 @@ def test_unconsumed_engine_context_fails_the_request():
     assert adapter.closed == ["failed"] and not controller.contexts
 
 
-def umm_stages(**changes):
+def umm_stages(*extra, **changes):
     controller = {
         "factory_path": CONTROLLER_FACTORY_PATH,
         "next": ["reasoner", "generator", "output"],
@@ -574,7 +574,14 @@ def umm_stages(**changes):
     return [
         stage("orchestrator", **controller),
         stage("output", **output),
-        stage("reasoner", next="orchestrator", process="reasoner"),
+        stage(
+            "reasoner",
+            **{
+                "next": "orchestrator",
+                "process": "reasoner",
+                **changes.get("reasoner", {}),
+            },
+        ),
         stage(
             "generator",
             **{
@@ -583,7 +590,86 @@ def umm_stages(**changes):
                 **changes.get("generator", {}),
             },
         ),
+        *(stage(name, **settings) for name, settings in extra),
     ]
+
+
+TAIL = ("generator_tail", {"next": "orchestrator", "process": "generator"})
+CHAIN = {"generator": {"next": "generator_tail", "stream_to": ["generator_tail"]}}
+
+
+@pytest.mark.parametrize(
+    "extra, changes, message",
+    [
+        ((TAIL,), CHAIN, None),
+        (
+            (TAIL,),
+            {
+                **CHAIN,
+                "orchestrator": {
+                    "next": ["reasoner", "generator", "generator_tail", "output"]
+                },
+            },
+            "inside a phase chain",
+        ),
+        (
+            (("generator_tail", {**TAIL[1], "stream_to": ["generator"]}),),
+            CHAIN,
+            "generator_tail.stream_to must be",
+        ),
+        (
+            (
+                ("generator_tail", {"next": "generator_loop", "process": "generator"}),
+                ("generator_loop", {"next": "generator_tail", "process": "generator"}),
+            ),
+            CHAIN,
+            "breaks the chain",
+        ),
+        (
+            (("generator_tail", {"terminal": True, "process": "generator"}),),
+            CHAIN,
+            "breaks the chain",
+        ),
+        (
+            (("generator_tail", {**TAIL[1], "route_fn": ROUTE_FN_PATH}),),
+            CHAIN,
+            "route_fn must stay unset",
+        ),
+        (
+            (TAIL,),
+            {**CHAIN, "reasoner": {"next": "generator_tail"}},
+            "belongs to the chains",
+        ),
+    ],
+    ids=[
+        "valid-chain",
+        "chain-member-in-controller-next",
+        "chain-streams-backward",
+        "chain-cycle",
+        "terminal-chain-member",
+        "routed-chain-member",
+        "shared-chain-member",
+    ],
+)
+def test_pipeline_config_accepts_phase_chains_only_when_private(
+    extra, changes, message
+):
+    """A chained phase returns from its last stage; nothing else may enter the chain."""
+
+    def build():
+        config = UMMPipelineConfig(
+            model_path="model",
+            entry_stage="orchestrator",
+            stages=umm_stages(*extra, **changes),
+        )
+        build_compiled_process_topology(config)
+        return config
+
+    if message is None:
+        build()
+    else:
+        with pytest.raises(ValueError, match=message):
+            build()
 
 
 @pytest.mark.parametrize(
@@ -654,7 +740,8 @@ async def settle(stages):
         pass
 
 
-def real_stages(controller, relay, *, reasoner_script, generator_script):
+def real_stages(controller, relay, *, reasoner_script, generator_script, chain=False):
+    """With chain, the generator phase returns through a generator_tail stage."""
     stages = {}
     crossed = []
 
@@ -674,7 +761,7 @@ def real_stages(controller, relay, *, reasoner_script, generator_script):
             crossed.append((msg.from_stage, target, isinstance(token, Continuation)))
             await stages[target].on_data_ready(received_message)
 
-    names = ("orchestrator", "output", "reasoner", "generator")
+    names = ("orchestrator", "output", "reasoner", "generator", "generator_tail")
     endpoints = {name: "inproc://" + name for name in names}
     dispatcher = LocalStageDispatcher()
     local = {"local_dispatcher": dispatcher}
@@ -702,13 +789,24 @@ def real_stages(controller, relay, *, reasoner_script, generator_script):
     stages["output"].stream_queue = StreamQueue()
     stages["output"].control_plane.send_stream = AsyncMock()
     dispatcher.register_many([stages["orchestrator"], stages["output"]])
-    for name, script in (
-        ("reasoner", reasoner(reasoner_script)),
-        ("generator", generator(generator_script)),
-    ):
+    phase_stages = [
+        ("reasoner", reasoner(reasoner_script), "orchestrator"),
+        (
+            "generator",
+            generator(generator_script),
+            "generator_tail" if chain else "orchestrator",
+        ),
+    ]
+    if chain:
+        phase_stages.append(
+            ("generator_tail", lambda payload: payload.data, "orchestrator")
+        )
+    else:
+        pass
+    for name, script, next_stage in phase_stages:
         stages[name] = make_stage(
             name=name,
-            get_next=lambda *_: "orchestrator",
+            get_next=lambda *_, next_stage=next_stage: next_stage,
             endpoints=endpoints,
             control_plane=Bridge(),
             relay=ShmRelay(name, device="cpu", credits=1),
@@ -754,10 +852,9 @@ async def run_real_stages(stages, controller, rid="req"):
         await settle(stages)
 
     await orchestrate()
-    while not stages["reasoner"].scheduler.inbox.empty() or not (
-        stages["generator"].scheduler.inbox.empty()
-    ):
-        for name in ("reasoner", "generator"):
+    phases = [name for name in stages if name not in ("orchestrator", "output")]
+    while any(not stages[name].scheduler.inbox.empty() for name in phases):
+        for name in phases:
             inbox = stages[name].scheduler.inbox
             if inbox.empty():
                 continue
@@ -767,7 +864,10 @@ async def run_real_stages(stages, controller, rid="req"):
             result = reply(item, stages[name].script(item))
             await asyncio.wait_for(stages[name].route_result(rid, result), 2)
             await settle(stages)
-            await orchestrate()
+            if stages[name].get_next(rid, result) == "orchestrator":
+                await orchestrate()
+            else:
+                pass
     output = stages["output"]
     for _ in range(200):
         output.end_outbox_drain()
@@ -828,6 +928,45 @@ async def test_real_stages_loop_over_relays_and_stream_through_the_output_stage(
         # its continuation. The completed request reaches the output locally.
         assert len(crossed) == 10 and all(token for *_, token in crossed)
         assert stages["orchestrator"].control_plane.completions == []
+        for obj in stages.values():
+            assert not obj.active_requests and not obj.comm.pending
+        assert not controller.contexts
+    finally:
+        await stop_real_stages(stages, controller, relay, relay_thread)
+
+
+@pytest.mark.asyncio
+async def test_chained_phase_returns_its_continuation_from_the_last_stage():
+    """The generator phase runs on a two-stage chain whose tail answers the controller."""
+    controller = make_controller(SplitAdapter())
+    relay, relay_thread = start_relay()
+    stages, crossed = real_stages(
+        controller,
+        relay,
+        reasoner_script=[generate("a cat"), final("done")],
+        generator_script=[{"url": "cat"}],
+        chain=True,
+    )
+    try:
+        stages["orchestrator"].active_requests.add("req")
+        await stages["orchestrator"].execute(initial(stream=True))
+        await run_real_stages(stages, controller)
+        output = stages["output"]
+        assert [c.success for c in output.control_plane.completions] == [True]
+        chunks = [
+            call.args[0].chunk for call in output.control_plane.send_stream.mock_calls
+        ]
+        assert [(c["kind"], c["data"]) for c in chunks] == [
+            ("image", {"url": "cat"}),
+            ("text", "done"),
+        ]
+        hops = [(source, target) for source, target, _ in crossed]
+        assert hops[2:5] == [
+            ("orchestrator", "generator"),
+            ("generator", "generator_tail"),
+            ("generator_tail", "orchestrator"),
+        ]
+        assert all(token for *_, token in crossed)
         for obj in stages.values():
             assert not obj.active_requests and not obj.comm.pending
         assert not controller.contexts

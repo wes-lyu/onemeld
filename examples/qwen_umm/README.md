@@ -1,99 +1,82 @@
-# Dynamic Qwen-VL and Qwen-Image composition on UMM
+# Qwen any-to-any composition on UMM
 
-Send a natural-language task through one Chat Completions request. The public UMM composition executor runs a model-generated plan across two independent models: Qwen2.5-VL-3B-Instruct for planning and text/vision answers, and Qwen-Image-2512 for image generation. Both use native SGLang stages. The Qwen package declares capability bindings and model paths only; planning and execution live in `sglang_omni.pipeline.umm_plan` and `sglang_omni.pipeline.umm_composition`. The client submits one request and saves the response.
+Send a natural-language task, with optional images and speech, through one Chat Completions request. The public UMM composition executor lets Qwen2.5-VL plan over independent Qwen checkpoints, each on its own native SGLang stage, and returns ordered text, image and audio segments. The Qwen package declares model paths, stages and capabilities only; planning and execution live in `sglang_omni.pipeline`, and the [composition reference](../../docs/developer_reference/umm_composition.md) describes them.
+
+| Configuration | Capabilities | Models |
+| --- | --- | --- |
+| `QwenUMMPipelineConfig` ([launch.yaml](launch.yaml)) | `respond`, `generate_image` | Qwen2.5-VL, Qwen-Image-2512 |
+| `QwenAnyToAnyPipelineConfig` ([launch_any_to_any.yaml](launch_any_to_any.yaml)) | adds `transcribe`, `speak` | adds Qwen3-ASR, Qwen3-TTS |
+| `QwenAnyToAnyEditPipelineConfig` ([launch_any_to_any_edit.yaml](launch_any_to_any_edit.yaml)) | adds `edit_image` | adds Qwen-Image-Edit |
 
 ```text
-POST /v1/chat/completions
-  → Qwen-VL produces a JSON execution plan
-  → UMM dispatches each planned action:
-       generate_image → native SGLang multimodal_gen → image segment
-       respond        → native SGLang SRT, with referenced images → text segment
-  → one Chat Completion with ordered images and text
+POST /v1/chat/completions (text, image_url, input_audio parts)
+  → Qwen-VL replies with steps, or with the final outputs
+  → UMM runs each ready step on its stage, in parallel where steps are independent:
+       respond        → native SGLang chat, with referenced images and videos
+       generate_image → native SGLang diffusion
+       edit_image     → native SGLang diffusion with image_path
+       transcribe     → Qwen3-ASR
+       speak          → Qwen3-TTS preprocessing → engine → vocoder, one phase
+  → iterative mode: Qwen-VL sees the results and replies again
+  → one Chat Completion with the published segments in order
 ```
 
-All requests use the same entrypoint and stage configuration. The model chooses the actions, their number, generation prompts, and image dependencies from the user's request. Request keywords and output modalities do not select a predefined workflow. For example, a text question can produce one `respond` action, a one-image request one `generate_image` action, and a two-image comparison two generation actions followed by a response referencing both images.
-
-This is composition of independent model instances inside the serving runtime. The image model owns its own condition encoder; it does not share Qwen-VL weights or KV caches with the understanding stage. The public controller factory and configuration validator now accept an opt-in `composition` specification. Existing adapters retain their original path; native stage implementations and HTTP routes are reused. The [public composition reference](../../docs/developer_reference/umm_composition.md) describes the reusable configuration and protocols.
+The any-to-any configurations default to iterative mode and also allow plan mode; a request picks one with `stage_params.orchestrator.mode`. The text-to-image configuration plans upfront.
 
 ## Launch
 
-Use a Linux CUDA environment with this checkout's dependencies installed. The supplied profile colocates both stages on one GPU: the understanding stage has a 4096-token context and a 22% SRT memory fraction, while the image stage uses native layerwise transformer offload plus text encoder and VAE CPU offload. This requires substantial host memory and trades latency for GPU residency. The previous fixed-flow tests used a 48 GB RTX 4090 with approximately 94 GiB host RAM; [GPU_RESULTS.md](GPU_RESULTS.md) records that baseline.
+Use a Linux CUDA environment with this checkout's dependencies installed, and activate it before launch so native JIT compilation can find its build tools. The any-to-any profile places every stage on one 48 GB GPU: the image stage offloads its transformer layers, text encoder and VAE to the CPU, which needs substantial host memory and trades latency for GPU residency. The memory fractions are starting points to measure, not tuned values.
 
 ```bash
 python -m sglang_omni.cli serve \
-  --config examples/qwen_umm/launch.yaml \
+  --config examples/qwen_umm/launch_any_to_any.yaml \
   --model-path /path/to/Qwen-Image-2512 \
   --text-model-path /path/to/Qwen2.5-VL-3B-Instruct \
+  --asr-model-path /path/to/Qwen3-ASR-1.7B \
+  --tts-model-path /path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice \
   --host 127.0.0.1 --port 8897
 ```
 
-Activate the environment before launch so native JIT compilation can find its build tools. To place the models on different GPUs, change `understanding.gpu` and `generation.gpu`, and adjust their memory budgets.
+A CustomVoice checkpoint may need a voice: set `speech` on the `speak` capability, for example `{"voice": "Vivian"}`, in the configuration's composition. The edit profile also takes `--edit-model-path`; it holds two offloaded diffusion transformers, so it needs more host memory than the base profile. To place models on different GPUs, change each stage's `gpu` and memory fraction.
 
 ## Submit a task
 
 ```bash
 python -m examples.qwen_umm.compare \
   --base-url http://127.0.0.1:8897 \
-  --output-dir results/dynamic-cats \
-  --prompt 'Generate two photographs of an orange kitten on a wooden windowsill. Inspect both images, score each out of 10, and explain which is better.'
+  --model qwen_umm_any_to_any \
+  --output-dir results/fox \
+  --audio question.wav \
+  --prompt 'Transcribe my recording, draw what it describes, describe the drawing in one sentence and read that sentence aloud.'
 ```
 
-Use another prompt to request a different action sequence, for example `Explain why cats purr in one sentence. Do not generate images.` or `Generate only one photograph of an orange kitten. Do not add text.` The client uses identical controls for these tasks; it does not send a mode or plan.
+`--image` attaches images, `--audio` attaches WAV or MP3 recordings, and `--mode` selects `plan` or `iterative`. The client saves `request.json`, `response.json`, `report.json` and each segment as `segment_<n>.txt`, `.png` or `.wav`, after checking each media item against its SHA-256.
 
-The request shape is:
+Media must be inline: the client sends images as data URLs and audio as `input_audio` parts. The planner sees attached and generated images; it learns what a recording says only through a `transcribe` step. A Qwen3-ASR step takes one clip of at most about 30 seconds.
+
+## Replies and evidence
+
+An iterative turn names the steps to run now and, when the task is done, the outputs to publish:
 
 ```json
-{
-  "model": "qwen_umm_demo",
-  "messages": [{"role": "user", "content": "Generate two cat photographs, inspect them, and choose the better result."}],
-  "modalities": ["text", "image"],
-  "stream": false,
-  "max_completion_tokens": 1024,
-  "seed": 42,
-  "stage_params": {"orchestrator": {"steps": 20, "width": 512, "height": 512}}
-}
+{"steps": [{"id": "said", "action": "transcribe", "instruction": "Transcribe the recording", "input_refs": ["user_audio_1"]}, {"id": "fox", "action": "generate_image", "instruction": "Illustrate the transcript", "input_refs": ["said"]}], "final": null}
 ```
-
-The planner's own token limit is separate from the answer limit so a short answer request does not truncate the plan. Set `stage_params.orchestrator.planning_max_new_tokens` to override the composition's default of 1536, within the native model's configured context capacity. Text sampling is greedy in this example. Image seeds increment for each generated image within the request.
-
-The configuration supplies one planning example about describing, generating and checking a red bicycle. The public `plan_examples` interface places it in the planner's chat context to demonstrate private text dependencies. Example actions are not executed; each actual request still requires its own model-generated, validated plan. The small planner can misunderstand a task even when its output is structurally valid, so inspect plans as well as returned segments when evaluating a deployment.
-
-## Plans and execution evidence
-
-A model-generated plan has this structure:
 
 ```json
-{
-  "steps": [
-    {"id": "cat_a", "action": "generate_image", "instruction": "An orange kitten on a wooden windowsill, natural morning light, photography", "input_refs": [], "publish": true},
-    {"id": "cat_b", "action": "generate_image", "instruction": "An orange kitten on a wooden windowsill, natural morning light, photography", "input_refs": [], "publish": true},
-    {"id": "review", "action": "respond", "instruction": "Score both images out of 10 and explain the visible difference supporting the winner.", "input_refs": ["cat_a", "cat_b"], "publish": true}
-  ]
-}
+{"steps": [{"id": "caption", "action": "respond", "instruction": "Describe the drawing in one sentence", "input_refs": ["fox"]}, {"id": "voice", "action": "speak", "instruction": "Read the caption aloud", "input_refs": ["caption"]}], "final": {"publish": ["fox", "voice"], "answer": ""}}
 ```
 
-The server validates unique IDs, configured actions, typed references to earlier text/image artifacts, and plan limits before execution. This configuration allows six steps and four generated images, with at most two planning attempts. A rejected plan is returned to the model with its validation error for one repair attempt; a second rejection fails the request. No fixed workflow is substituted. A `respond` action receives the actual artifacts named by `input_refs`. Only actions with `publish: true` produce user output, so a private text description can feed a later image prompt without being returned to the user.
+The server checks every reply before any step runs: configured actions, unique IDs, references to existing artifacts of accepted kinds, the step, turn and media budgets, and a final output that publishes only step results. A rejected reply goes back to the planner with its error for one repair; a second rejection fails the request. The configurations enable tracing: `UMM composition trace` log entries record accepted and rejected replies, each dispatch with its stage and input hashes, each artifact and each replanning point, keyed by the `execution_id` of the returned segments.
 
-This example enables the public executor's optional tracing. `UMM composition trace` log entries contain JSON events for accepted plans, actual capability/stage dispatches, and text/image artifact hashes. Match `execution_id` to the returned segments to verify actual routing and artifact handoff. Other deployments can disable tracing in their composition specification.
-
-The client saves `request.json`, `response.json`, `report.json`, `answer.txt`, and any returned `image_1.png`, `image_2.png`, and subsequent images. Its report includes the endpoint, HTTP status, execution ID, output order, image hashes, and elapsed time. It validates image content against the returned hashes.
-
-## Output and limits
-
-The Chat Completion places joined text in `choices[0].message.content` and ordered image/text segments in `choices[0].message.segments`. The `segments` field and `stage_params` are existing Omni extensions; clients must understand the extension to display generated images. With the OpenAI Python client, supply `stage_params` through `extra_body`.
-
-This version generates one plan before execution and runs it sequentially. It does not revise the plan after inspecting a result. The existing UMM contract permits one in-flight phase per stage per request, so image actions are dispatched sequentially. Planning and response phases share the same Qwen-VL engine.
-
-Chat input is one user message with string content. Multi-turn messages, multipart chat input, image editing, video, external tools, and cross-model tensor/KV transfer are outside the current protocols. The `/generate` endpoint also accepts string tasks with sampling options under `metadata.composition`; an optional PNG in `image_base64` is available as `input_image`. The old demo-specific `mode` options and Qwen adapter have been replaced by the public composition path.
+A 3B planner can misread a task even when its reply is valid, so inspect the traced replies as well as the segments when evaluating a deployment. A larger Qwen2.5-VL planner needs a larger `understanding` budget.
 
 ## Validation
 
 ```bash
-python -m pytest tests/unit_test/qwen_umm \
-  tests/unit_test/pipeline/test_umm_composition.py \
-  tests/unit_test/pipeline/test_umm_planning.py \
-  tests/unit_test/pipeline/test_umm.py \
+python -m pytest tests/unit_test/qwen_umm tests/unit_test/client/test_image_media.py \
+  tests/unit_test/pipeline/test_umm.py tests/unit_test/pipeline/test_umm_composition.py \
+  tests/unit_test/pipeline/test_umm_planning.py tests/unit_test/pipeline/test_umm_protocols.py \
   tests/unit_test/serve/test_umm_serving.py -q
 ```
 
-Public composition tests use arbitrary capability and stage names, including separate planner/vision stages, and exercise exact image handoff, private text-to-image dependencies, output visibility, invalid plans and cancellation cleanup. Existing controller, serving and model-adapter tests check compatibility. [Earlier dynamic GPU results](DYNAMIC_GPU_RESULTS.md) record the preceding Qwen-specific implementation before public extraction.
+These CPU tests run both modes on the same tasks with fake stages, including speech to image to speech, parallel replicas, retries, multipart input, chains on real stage runtimes and cancellation. The any-to-any configurations have not run on a GPU yet. [GPU_RESULTS.md](GPU_RESULTS.md) and [DYNAMIC_GPU_RESULTS.md](DYNAMIC_GPU_RESULTS.md) record smoke runs of earlier text-to-image versions.

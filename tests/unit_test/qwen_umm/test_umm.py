@@ -123,6 +123,35 @@ def test_profiles_without_speech_output_run_both_modes(
         pass
 
 
+def test_reasoning_profile_routes_planning_separately_from_visual_tasks() -> None:
+    configuration = ConfigManager.from_file(
+        "examples/qwen_umm/launch_sensenova_speech_reasoning.yaml"
+    ).config
+    controller = create_umm_controller(
+        configuration.model_path,
+        output_stage="output",
+        **resolve_stage_typed_kwargs(configuration.stage_named("orchestrator")),
+    )
+    composition = controller.adapter.composition
+    assert composition.phases["plan"] == "planning"
+    assert composition.capabilities["respond"].stages == ["understanding"]
+    assert configuration.stage_factory_kwargs("planning")["model_path"] == (
+        "Qwen/Qwen3-4B"
+    )
+    assert configuration.stage_factory_kwargs("understanding")["model_path"] == (
+        "Qwen/Qwen3-VL-4B-Instruct"
+    )
+    assert (
+        resolve_stage_typed_kwargs(configuration.stage_named("planning"))[
+            "server_args_overrides"
+        ]["reasoning_parser"]
+        == "qwen3"
+    )
+    assert composition.planning_temperature == 0.0
+    assert composition.planning_max_new_tokens == 1536
+    assert composition.audio_instruction_capability == "transcribe"
+
+
 def test_controller_budget_below_the_iterative_requirement_is_rejected() -> None:
     configuration = QwenAnyToAnyPipelineConfig(model_path="model")
     controller = configuration.stage_named("orchestrator")
@@ -140,3 +169,41 @@ def test_controller_budget_below_the_iterative_requirement_is_rejected() -> None
     ]
     with pytest.raises(ValueError, match="max_dispatches must cover"):
         QwenAnyToAnyPipelineConfig(model_path="model", stages=stages)
+
+
+@pytest.mark.parametrize(
+    "profile", ["launch_speech_plan.yaml", "launch_sensenova_speech_plan.yaml"]
+)
+def test_speech_plan_profile_reserves_transcription_before_one_plan(
+    profile: str,
+) -> None:
+    configuration = ConfigManager.from_file(f"examples/qwen_umm/{profile}").config
+    controller = create_umm_controller(
+        configuration.model_path,
+        output_stage="output",
+        **resolve_stage_typed_kwargs(configuration.stage_named("orchestrator")),
+    )
+    composition = controller.adapter.composition
+    assert composition.allowed_modes == ["plan"]
+    assert composition.execution_mode == "plan"
+    assert composition.max_plan_attempts == 1
+    assert composition.max_concurrent_steps == 1
+    assert (
+        composition.capabilities[composition.audio_instruction_capability].protocol
+        == "asr"
+    )
+    assert composition.required_dispatches() == composition.max_steps + 2
+    assert (
+        configuration.stage_factory_kwargs("asr")["model_path"] == "Qwen/Qwen3-ASR-0.6B"
+    )
+    if profile == "launch_sensenova_speech_plan.yaml":
+        generation = configuration.stage_named("generation")
+        assert generation.factory_path == (
+            "sglang_omni.models.sensenova_u1.stages.create_generation_executor"
+        )
+        assert configuration.model_path == "SenseNova/SenseNova-U1.5-8B-MoT"
+        assert "inline_media" not in configuration.stage_factory_kwargs("generation")
+        assert resolve_stage_typed_kwargs(generation)["enable_cache_dit"] is True
+        assert composition.capabilities["generate_image"].protocol == "image_base64"
+    else:
+        assert configuration.stage_factory_kwargs("generation")["inline_media"] is True

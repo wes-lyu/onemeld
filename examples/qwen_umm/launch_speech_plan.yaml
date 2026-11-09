@@ -1,0 +1,31 @@
+config_cls: QwenSpeechPlanPipelineConfig
+model_path: Qwen/Qwen-Image-2512
+text_model_path: Qwen/Qwen2.5-VL-3B-Instruct
+asr_model_path: Qwen/Qwen3-ASR-0.6B
+stages:
+  understanding:
+    gpu: 0
+    gpu_memory_fraction: 0.22
+    engine:
+      mem_fraction_static: 0.2
+      context_length: 8192
+      max_running_requests: 1
+      attention_backend: triton
+      disable_cuda_graph: true
+  generation:
+    gpu: 0
+    gpu_memory_fraction: 0.5
+    factory:
+      server_args_overrides:
+        dit_layerwise_offload: true
+        dit_layerwise_resident_layers: 0.25
+        dit_layerwise_residency_lifetime: permanent
+        text_encoder_cpu_offload: true
+        vae_cpu_offload: true
+  asr:
+    gpu: 0
+    gpu_memory_fraction: 0.24
+    factory:
+      max_running_requests: 1
+      max_audio_clip_s: 30
+      mem_fraction_static: 0.24

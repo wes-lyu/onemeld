@@ -27,12 +27,32 @@ SHARED_RULES = (
     "step's computation yourself or invent its result. Each media-producing step makes exactly one item; "
     "to make two images, plan two steps with a prompt each. A step may reference client inputs, earlier "
     "results and earlier steps of the same reply in input_refs, never itself; use input_refs=[] when it has "
-    "no dependencies. Steps that do not reference each other run in parallel. Referenced kinds must be "
+    "no dependencies. Independent steps may run in parallel when the execution limit allows it. Referenced kinds must be "
     "accepted by the capability. Use unique lowercase step IDs that do not start with user_."
 )
 PLAN_RULES = (
-    "Plan the whole task now, before any step runs. Return only JSON matching the schema. Set publish=true "
-    "for the outputs the user asked for and false for intermediate work."
+    "Plan the whole task now, before any step runs. Return only JSON matching the schema. "
+    "Follow these rules in order:\n"
+    "1. Identify every requested operation. If the user asks to first write or describe something and "
+    "then generate media, create a text step followed by a media step referencing that text. Do not "
+    "write the text yourself inside the media instruction or replace a requested step with a check. "
+    "Do not add checks or other operations the user did not request.\n"
+    "2. Each instruction must preserve the user's target subject, quantity, attributes and prohibitions "
+    "that apply to that step. Media generators receive only their step instruction and referenced "
+    "results, not the original request. State the target subject and constraints explicitly in each "
+    "media instruction even when it references a description. Never add content the user forbids.\n"
+    "3. Reference the actual artifacts needed for each operation. When transferring style, ask the "
+    "description step to describe visual style separately from depicted subject matter; instruct the "
+    "generation step to apply that style to the user's new subject, not copy the reference subject. "
+    "When evaluating outputs, reference the generated media. When choosing from evaluations, reference "
+    "the evaluations and preserve the user's criteria and tie-breaking rule.\n"
+    "4. Set publish=true for each requested written answer, description, design, evaluation and media "
+    "output, including earlier steps in a sequence. A result can be both published and used as input "
+    "to another step. Set publish=false only for implementation work the user did not ask to see or "
+    "work explicitly requested as private. Follow explicit 'only return' restrictions.\n"
+    "5. Before returning JSON, check that every requested operation has a step, every target and "
+    "prohibition is preserved, dependencies point to the needed results, and all requested outputs "
+    "are published. Examples show syntax; their steps and publication choices are not defaults."
 )
 ITERATIVE_RULES = (
     "You plan in turns. Return only JSON matching the schema. Each reply either runs steps with final=null, "
@@ -157,6 +177,8 @@ def build_planner_request(
         f"You plan a task over independent model capabilities. {PLAN_RULES if mode == 'plan' else ITERATIVE_RULES} "
         f"{SHARED_RULES} Use at most {budget.remaining_steps} steps and at most these new media items: "
         f"{json.dumps(budget.remaining_media)}. Capabilities: {json.dumps(capabilities, ensure_ascii=False)}"
+        f" Available input artifact IDs and kinds: {json.dumps({name: artifact.kind for name, artifact in artifacts.items()})}. "
+        "Copy reference IDs exactly; use [] for no dependencies, never an empty string."
     )
     if composition.plan_examples:
         examples = [
@@ -242,9 +264,18 @@ def build_planner_request(
     return OmniRequest(
         inputs=messages,
         params={
+            **(
+                {"chat_template_kwargs": composition.planning_chat_template_kwargs}
+                if composition.planning_chat_template_kwargs
+                else {}
+            ),
             "max_new_tokens": max_new_tokens,
             # A repair samples, since a greedy repair tends to repeat the rejected reply.
-            "temperature": 0.0 if repair is None else REPAIR_TEMPERATURE,
+            "temperature": (
+                composition.planning_temperature
+                if repair is None
+                else REPAIR_TEMPERATURE
+            ),
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {

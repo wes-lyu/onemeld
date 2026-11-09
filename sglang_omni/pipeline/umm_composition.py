@@ -4,7 +4,7 @@
 import json
 import logging
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from pydantic import JsonValue
@@ -18,6 +18,12 @@ from sglang_omni.pipeline.umm import (
     UMMRequestError,
     UMMStep,
 )
+from sglang_omni.pipeline.umm_contract import (
+    UMMContractCandidate,
+    UMMContractReview,
+    build_contract_request,
+    compile_task_contract,
+)
 from sglang_omni.pipeline.umm_plan import (
     PLAN_PHASE,
     ArtifactKind,
@@ -27,6 +33,7 @@ from sglang_omni.pipeline.umm_plan import (
     UMMFinal,
     UMMPlannerTurn,
     UMMStepCall,
+    media_part,
     normalize_steps,
     plan_calls,
 )
@@ -41,13 +48,21 @@ from sglang_omni.pipeline.umm_protocols import (
     step_artifact,
     step_request,
 )
-from sglang_omni.pipeline.umm_task import ClientTask, parse_task
+from sglang_omni.pipeline.umm_task import MAX_TASK_TEXT_BYTES, ClientTask, parse_task
 
 logger = logging.getLogger(__name__)
 
-SEEDED_PROTOCOLS = ("native_image", "native_video")
+SEEDED_PROTOCOLS = ("native_image", "native_video", "image_base64")
 TraceEvent = Literal[
-    "plan", "plan_rejected", "normalized", "dispatch", "artifact", "observe"
+    "plan",
+    "plan_rejected",
+    "normalized",
+    "dispatch",
+    "artifact",
+    "observe",
+    "input_transcription",
+    "contract",
+    "contract_review",
 ]
 
 
@@ -71,6 +86,8 @@ class CompositionExecution:
     seeded_steps: int = 0
     plan_attempts: int = 0
     repair: UMMPlanRepair | None = None
+    input_transcription: UMMStepCall | None = None
+    candidate: UMMContractCandidate | None = None
 
 
 def generated_kinds(execution: CompositionExecution) -> Counter[ArtifactKind]:
@@ -109,10 +126,41 @@ class UMMCompositionAdapter:
             task = parse_task(context.request, self.composition, self.stage_name)
         except ValueError as error:
             raise UMMRequestError(str(error)) from error
-        self.executions[context.execution_id] = CompositionExecution(
-            task=task, artifacts=dict(task.artifacts)
-        )
-        return self.planner_step(context, ())
+        execution = CompositionExecution(task=task, artifacts=dict(task.artifacts))
+        self.executions[context.execution_id] = execution
+        if task.audio_instruction_ref is None:
+            return self.planner_step(context, ())
+        else:
+            action = self.composition.audio_instruction_capability
+            assert action is not None
+            capability = self.composition.capabilities[action]
+            transcription = UMMStepCall(
+                id="user_transcript",
+                action=action,
+                instruction="Transcribe the user's spoken instruction.",
+                input_refs=[task.audio_instruction_ref],
+            )
+            execution.input_transcription = transcription
+            self.emit_trace(
+                context,
+                "input_transcription",
+                {
+                    "stage": capability.stages[0],
+                    "input_ref": task.audio_instruction_ref,
+                },
+            )
+            return UMMStep(
+                phase=capability.stages[0],
+                request=step_request(
+                    capability,
+                    transcription,
+                    execution.artifacts,
+                    task.options,
+                    task.text,
+                    0,
+                    self.composition.response_max_new_tokens,
+                ),
+            )
 
     def budget(self, execution: CompositionExecution) -> PlannerBudget:
         composition = self.composition
@@ -133,6 +181,26 @@ class UMMCompositionAdapter:
         self, context: UMMContext, outputs: tuple[UMMOutput, ...]
     ) -> UMMStep:
         execution = self.executions[context.execution_id]
+        if self.composition.task_operations:
+            return UMMStep(
+                phase=PLAN_PHASE,
+                request=build_contract_request(
+                    self.composition,
+                    execution.task.text,
+                    {
+                        name: artifact.kind
+                        for name, artifact in execution.artifacts.items()
+                    },
+                    execution.task.options.planning_max_new_tokens
+                    or self.composition.planning_max_new_tokens,
+                    execution.repair,
+                    execution.candidate,
+                    seed=execution.task.options.seed,
+                ),
+                outputs=outputs,
+            )
+        else:
+            pass
         return UMMStep(
             phase=PLAN_PHASE,
             request=build_planner_request(
@@ -151,7 +219,69 @@ class UMMCompositionAdapter:
 
     def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
         execution = self.executions[context.execution_id]
-        if phase == PLAN_PHASE:
+        transcription = execution.input_transcription
+        if transcription is not None:
+            capability = self.composition.capabilities[transcription.action]
+            if phase != capability.stages[0]:
+                raise ValueError(f"Unexpected input transcription phase {phase!r}")
+            else:
+                artifact = step_artifact(
+                    capability,
+                    transcription,
+                    result,
+                    self.composition.max_inline_media_bytes,
+                )
+            assert isinstance(artifact.value, str)
+            instruction = artifact.value.strip()
+            audio_reference = execution.task.audio_instruction_ref
+            assert audio_reference is not None
+            audio_artifact = execution.artifacts[audio_reference]
+            assert not isinstance(audio_artifact.value, str)
+            audio_marker = {
+                "type": "text",
+                "text": f"[user] attached {audio_reference} (audio)",
+            }
+            content = [
+                part
+                for part in execution.task.content
+                if part not in (audio_marker, media_part(audio_artifact.value))
+            ]
+            content.append({"type": "text", "text": f"[user] {instruction}"})
+            task_text = "\n".join(
+                part["text"] for part in content if isinstance(part.get("text"), str)
+            )
+            if not instruction:
+                raise UMMRequestError("The voice instruction has no transcription")
+            elif len(task_text.encode("utf-8")) > MAX_TASK_TEXT_BYTES:
+                raise UMMRequestError(
+                    "The transcribed instruction exceeds the task text limit"
+                )
+            else:
+                execution.artifacts[transcription.id] = UMMArtifact(
+                    value=instruction, action=None
+                )
+                execution.artifacts.pop(audio_reference)
+                execution.task = replace(
+                    execution.task,
+                    text=task_text,
+                    content=content,
+                    artifacts=dict(execution.artifacts),
+                    audio_instruction_ref=None,
+                )
+                execution.input_transcription = None
+                self.emit_trace(
+                    context,
+                    "artifact",
+                    {
+                        "step_id": transcription.id,
+                        "stage": phase,
+                        "kind": "text",
+                        "sha256": execution.artifacts[transcription.id].sha256,
+                        "text": instruction,
+                    },
+                )
+                return self.planner_step(context, ())
+        elif phase == PLAN_PHASE:
             return self.accept_reply(context, result)
         else:
             scheduled = execution.in_flight.pop(phase, None)
@@ -181,6 +311,10 @@ class UMMCompositionAdapter:
 
     def accept_reply(self, context: UMMContext, result: object) -> UMMStep:
         """Validate a planner reply, queue its steps and record its final output."""
+        if self.composition.task_operations:
+            return self.accept_contract_reply(context, result)
+        else:
+            pass
         execution = self.executions[context.execution_id]
         composition = self.composition
         reply_text = (
@@ -222,26 +356,104 @@ class UMMCompositionAdapter:
             else:
                 pass
         except ValueError as error:
-            attempt = execution.plan_attempts
-            self.emit_trace(
-                context,
-                "plan_rejected",
-                {
-                    "response": reply_text,
-                    "error": str(error),
-                    "attempt": attempt,
-                },
-            )
-            if (
-                attempt < composition.max_plan_attempts
-                and context.remaining_dispatches >= 1
-            ):
-                execution.repair = UMMPlanRepair(response=reply_text, error=str(error))
-                return self.planner_step(context, ())
+            return self.reject_reply(context, reply_text, error)
+        return self.enqueue_reply(context, reply)
+
+    def accept_contract_reply(self, context: UMMContext, result: object) -> UMMStep:
+        """Compile a task proposal and optionally review it before dispatch."""
+        execution = self.executions[context.execution_id]
+        candidate = execution.candidate
+        reply_text = (
+            candidate.response
+            if candidate is not None
+            else result.get("text", "") if isinstance(result, dict) else ""
+        )
+        if not isinstance(reply_text, str):
+            reply_text = ""
+        else:
+            pass
+        if candidate is None:
+            execution.plan_attempts += 1
+        else:
+            pass
+        try:
+            response = NativeTextResult.model_validate(result)
+            if response.finish_reason != "stop":
+                raise ValueError("Planning did not finish; refusing a partial reply")
+            elif candidate is None:
+                candidate = compile_task_contract(
+                    self.composition,
+                    response.text,
+                    execution.task.text,
+                    {
+                        name: artifact.kind
+                        for name, artifact in execution.artifacts.items()
+                    },
+                )
+                review_dispatches = int(self.composition.review_plan)
+                if (
+                    len(candidate.reply.steps) + review_dispatches
+                    > context.remaining_dispatches
+                ):
+                    raise ValueError(
+                        "Task contract exceeds the remaining dispatch budget"
+                    )
+                else:
+                    execution.candidate = candidate
+                self.emit_trace(
+                    context,
+                    "contract",
+                    {
+                        "attempt": execution.plan_attempts,
+                        "contract": candidate.contract.model_dump(mode="json"),
+                    },
+                )
+                if self.composition.review_plan:
+                    return self.planner_step(context, ())
+                else:
+                    execution.candidate = None
+                    return self.enqueue_reply(context, candidate.reply)
             else:
-                raise UMMPlanningError(
-                    f"{error} (after {attempt} planner attempts; trace execution_id={context.execution_id})"
-                ) from error
+                review = UMMContractReview.model_validate_json(response.text)
+                self.emit_trace(
+                    context, "contract_review", review.model_dump(mode="json")
+                )
+                if not review.accepted or review.violations:
+                    raise ValueError(
+                        "; ".join(review.violations)
+                        or "Task contract review rejected the proposal"
+                    )
+                else:
+                    execution.candidate = None
+        except ValueError as error:
+            return self.reject_reply(context, reply_text, error)
+        return self.enqueue_reply(context, candidate.reply)
+
+    def reject_reply(
+        self, context: UMMContext, response: str, error: ValueError
+    ) -> UMMStep:
+        execution = self.executions[context.execution_id]
+        execution.candidate = None
+        attempt = execution.plan_attempts
+        self.emit_trace(
+            context,
+            "plan_rejected",
+            {"response": response, "error": str(error), "attempt": attempt},
+        )
+        if (
+            attempt < self.composition.max_plan_attempts
+            and context.remaining_dispatches >= 1
+        ):
+            execution.repair = UMMPlanRepair(response=response, error=str(error))
+            return self.planner_step(context, ())
+        else:
+            raise UMMPlanningError(
+                f"{error} (after {attempt} planner attempts; trace execution_id={context.execution_id})"
+            ) from error
+
+    def enqueue_reply(self, context: UMMContext, reply: UMMPlannerTurn) -> UMMStep:
+        execution = self.executions[context.execution_id]
+        composition = self.composition
         for step in reply.steps:
             seeded = composition.capabilities[step.action].protocol in SEEDED_PROTOCOLS
             execution.pending.append(
@@ -347,6 +559,10 @@ class UMMCompositionAdapter:
                     None,
                 )
                 if set(step.input_refs) <= execution.artifacts.keys()
+                and (
+                    composition.max_concurrent_steps is None
+                    or len(execution.in_flight) < composition.max_concurrent_steps
+                )
                 else None
             )
             if stage is None:

@@ -10,6 +10,7 @@ import pytest
 from sglang_omni.client.image_media import InlineImage, InlineMedia
 from sglang_omni.pipeline.umm_plan import (
     UMMArtifact,
+    UMMCapability,
     UMMCompositionSpec,
     UMMRequestOptions,
     UMMStepCall,
@@ -23,6 +24,25 @@ from tests.unit_test.fixtures.umm_stages import (
 )
 
 pytest_plugins = ["tests.unit_test.fixtures.umm_composition"]
+
+
+@pytest.mark.parametrize("encoded, limit", [("not-base64!", 1024), ("eA==", 0)])
+def test_base64_image_result_rejects_invalid_or_oversized_content(
+    encoded: str, limit: int
+) -> None:
+    capability = UMMCapability(
+        stages=["generation"],
+        protocol="image_base64",
+        description="Generate one image",
+        input_kinds=["text"],
+    )
+    with pytest.raises(ValueError):
+        step_artifact(
+            capability,
+            UMMStepCall(id="cat", action="draw", instruction="Cat", input_refs=[]),
+            {"modality": "image", "image_b64": encoded},
+            limit,
+        )
 
 
 def artifacts(

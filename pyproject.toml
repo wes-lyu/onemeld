@@ -3,9 +3,9 @@ requires = ["setuptools>=77.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sglang-omni"
+name = "onemeld"
 dynamic = ["version"]
-description = "Multi-stage pipeline framework for omni models"
+description = "Unified model serving with independent specialist models"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -135,15 +135,14 @@ fishaudio = [
 ]
 
 [project.scripts]
+onemeld = "sglang_omni.cli:app"
 sgl-omni = "sglang_omni.cli:app"
 
 [project.entry-points."sglang.serve_backends"]
 omni = "sglang_omni.cli.sglang_backend:create_backend"
 
 [project.urls]
-Documentation = "https://sgl-project.github.io/sglang-omni/"
-Issues = "https://github.com/sgl-project/sglang-omni/issues"
-Repository = "https://github.com/sgl-project/sglang-omni"
+Upstream = "https://github.com/sgl-project/sglang-omni"
 
 [tool.uv]
 # The dependency set pins CUDA-13-only wheels (mooncake-transfer-engine-cuda13,

@@ -117,9 +117,9 @@ if [[ -n "${SGLANG_OMNI_PROJECT_DIR:-}" ]]; then
   # happens to sit next to a checkout.
   PROJECT_DIR=""
 elif [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/pyproject.toml" ]] \
-  && grep -q '^name = "sglang-omni"' "$SCRIPT_DIR/pyproject.toml"; then
+  && grep -Eq '^name = "(onemeld|sglang-omni)"' "$SCRIPT_DIR/pyproject.toml"; then
   PROJECT_DIR="$SCRIPT_DIR"
-elif [[ -f "$PWD/pyproject.toml" ]] && grep -q '^name = "sglang-omni"' "$PWD/pyproject.toml"; then
+elif [[ -f "$PWD/pyproject.toml" ]] && grep -Eq '^name = "(onemeld|sglang-omni)"' "$PWD/pyproject.toml"; then
   # A downloaded installer can still be run from a checked-out repository.
   PROJECT_DIR="$PWD"
 else
@@ -302,7 +302,7 @@ if [[ -z "$PROJECT_DIR" ]]; then
   clone_or_reuse "$PROJECT_DIR" "$OMNI_REF" "$OMNI_REPO" "sglang-omni"
 fi
 [[ -f "$PROJECT_DIR/pyproject.toml" ]] || die "sglang-omni pyproject.toml not found in $PROJECT_DIR"
-grep -q '^name = "sglang-omni"' "$PROJECT_DIR/pyproject.toml" \
+grep -Eq '^name = "(onemeld|sglang-omni)"' "$PROJECT_DIR/pyproject.toml" \
   || die "project is not sglang-omni: $PROJECT_DIR"
 
 PROJECT_SPEC="$PROJECT_DIR"

@@ -2,12 +2,13 @@
 """Native stage requests and results of each composition capability protocol."""
 
 import base64
+from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from sglang_omni.client.audio import encode_wav
-from sglang_omni.client.image_media import InlineMedia
+from sglang_omni.client.image_media import InlineImage, InlineMedia
 from sglang_omni.pipeline.umm_plan import (
     ContentPart,
     UMMArtifact,
@@ -19,8 +20,14 @@ from sglang_omni.pipeline.umm_plan import (
 from sglang_omni.proto.request import OmniRequest
 
 STEP_SYSTEM_PROMPT = (
-    "Complete the assigned step in the user's language. Inspect supplied images, video and audio when "
-    "present and ground comparisons in observable details. Follow the requested answer format."
+    "Execute only the assigned step and return its actual result in the user's language. The original "
+    "user request supplies context and constraints; other steps are handled separately. Do not repeat "
+    "the instruction, describe what you will do, or claim to have executed another step. Preserve all "
+    "applicable constraints, including forbidden content, when writing material for a later step. "
+    "Inspect supplied images, video and audio when present and ground comparisons in observable "
+    "details. Follow the requested answer format. For scores, use the same explicit numeric scale "
+    "for every item and criterion. Recommend an item only when assigned to do so, using the supplied "
+    "scores and the user's tie-breaking rule without contradicting or changing the scores."
 )
 SEED_MODULUS = 2**63
 
@@ -42,6 +49,13 @@ class NativeMedia(InlineMedia):
 
 class NativeMediaResult(BaseModel):
     media: list[NativeMedia] = Field(min_length=1, max_length=1)
+
+
+class Base64ImageResult(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    modality: Literal["image"]
+    image_b64: str
 
 
 class NativeWaveformResult(BaseModel):
@@ -96,7 +110,7 @@ def step_request(
             ],
             params={**capability.parameters, "max_new_tokens": max_new_tokens},
         )
-    elif capability.protocol in ("native_image", "native_video"):
+    elif capability.protocol in ("native_image", "native_video", "image_base64"):
         prompt = step.instruction + "".join(
             f"\nContext {reference}: {text}" for reference, text in texts
         )
@@ -115,6 +129,10 @@ def step_request(
             raise ValueError("Generation seed must be an integer")
         else:
             inputs["seed"] = (seed + seed_offset) % SEED_MODULUS
+        if capability.protocol == "image_base64":
+            return OmniRequest(inputs=prompt, params={**inputs, "n": 1})
+        else:
+            pass
         if len(media) == 1:
             inputs["image_path"] = media[0].url
         elif media:
@@ -155,6 +173,9 @@ def step_artifact(
     elif capability.protocol == "asr":
         transcription = NativeTranscriptionResult.model_validate(result)
         return UMMArtifact(value=transcription.text, action=step.action)
+    elif capability.protocol == "image_base64":
+        image = Base64ImageResult.model_validate(result)
+        value = InlineImage.from_png(image.image_b64)
     elif capability.protocol in ("native_image", "native_video"):
         native_media = NativeMediaResult.model_validate(result).media[0]
         if native_media.kind != capability.output_kind:

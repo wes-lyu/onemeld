@@ -18,7 +18,7 @@ USER_ARTIFACT_PREFIX = "user_"
 MAX_RENAMED_BASE = 28
 ArtifactKind = Literal["text", "image", "video", "audio"]
 CapabilityProtocol = Literal[
-    "native_chat", "native_image", "native_video", "asr", "tts"
+    "native_chat", "native_image", "native_video", "image_base64", "asr", "tts"
 ]
 ExecutionMode = Literal["plan", "iterative"]
 ContentPart = dict[str, str | dict[str, str]]
@@ -61,6 +61,13 @@ PROTOCOLS: dict[CapabilityProtocol, ProtocolContract] = {
             {"prompt", "image_path", "video_path", "num_outputs_per_prompt", "stream"}
         ),
         max_media_refs=1,
+        required_kind=None,
+    ),
+    "image_base64": ProtocolContract(
+        input_kinds=frozenset({"text"}),
+        output_kind="image",
+        runtime_fields=frozenset({"prompt", "n", "stream"}),
+        max_media_refs=0,
         required_kind=None,
     ),
     "asr": ProtocolContract(
@@ -171,6 +178,19 @@ class UMMCapability(BaseModel):
             raise ValueError("Only tts capabilities take speech parameters")
         else:
             return self
+
+
+class UMMTaskBinding(BaseModel):
+    """Bind a task operation and its semantic inputs to an existing capability."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    capability: str
+    description: str = Field(min_length=1)
+    instruction: str = Field(min_length=1)
+    input_types: list[str]
+    output_type: str = Field(min_length=1)
+    requires_input: bool = False
 
 
 class UMMStepCall(BaseModel):
@@ -302,6 +322,8 @@ class UMMCompositionSpec(BaseModel):
 
     planner_stage: str = Field(min_length=1)
     capabilities: dict[str, UMMCapability] = Field(min_length=1)
+    task_operations: dict[str, UMMTaskBinding] = Field(default_factory=dict)
+    review_plan: bool = False
     plan_examples: list[UMMPlanExample] = Field(default_factory=list, max_length=4)
     execution_mode: ExecutionMode = "plan"
     allowed_modes: list[ExecutionMode] = Field(
@@ -318,8 +340,12 @@ class UMMCompositionSpec(BaseModel):
     observation_text_bytes: int = Field(default=2048, ge=64)
     planner_media_kinds: list[MediaKind] = Field(default_factory=lambda: ["image"])
     planning_max_new_tokens: int = Field(default=1536, ge=256)
+    planning_temperature: float = Field(default=0.0, ge=0.0)
+    planning_chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
     response_max_new_tokens: int = Field(default=1024, ge=1)
     trace: bool = False
+    audio_instruction_capability: str | None = None
+    max_concurrent_steps: int | None = Field(default=None, ge=1)
 
     @property
     def phases(self) -> dict[str, str]:
@@ -357,8 +383,22 @@ class UMMCompositionSpec(BaseModel):
             raise ValueError("Capability names must be public identifiers")
         elif self.execution_mode not in self.allowed_modes:
             raise ValueError("execution_mode must be one of allowed_modes")
+        elif self.audio_instruction_capability is not None and (
+            self.audio_instruction_capability not in self.capabilities
+            or self.capabilities[self.audio_instruction_capability].protocol != "asr"
+        ):
+            raise ValueError("audio_instruction_capability must name an asr capability")
         else:
             pass
+        for name, binding in self.task_operations.items():
+            if not name.isidentifier() or name.startswith("_"):
+                raise ValueError(f"Invalid task operation name: {name}")
+            elif binding.capability not in self.capabilities:
+                raise ValueError(f"Task operation {name} uses an unknown capability")
+            elif self.allowed_modes != ["plan"]:
+                raise ValueError("Task contracts currently require plan-only execution")
+            else:
+                pass
         for example in self.plan_examples:
             turn = turn_from_plan(example.plan)
             self.validate_steps(turn.steps, {}, Counter(), self.max_steps)
@@ -370,10 +410,18 @@ class UMMCompositionSpec(BaseModel):
         """Controller dispatches the most expensive allowed mode can use."""
         planner_dispatches = max(
             self.max_plan_attempts
-            * (self.max_planner_turns if mode == "iterative" else 1)
+            * (
+                self.max_planner_turns
+                if mode == "iterative"
+                else 2 if self.task_operations and self.review_plan else 1
+            )
             for mode in self.allowed_modes
         )
-        return planner_dispatches + self.max_steps
+        return (
+            planner_dispatches
+            + self.max_steps
+            + (self.audio_instruction_capability is not None)
+        )
 
     def required_outputs(self) -> int:
         """Published artifacts, plus an iterative final answer."""

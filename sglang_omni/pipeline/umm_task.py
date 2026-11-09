@@ -97,6 +97,7 @@ class ClientTask:
     content: list[ContentPart]
     text: str
     artifacts: dict[str, UMMArtifact]
+    audio_instruction_ref: str | None = None
 
 
 def part_media(part: MediaPart, encoded_limit: int) -> InlineMedia:
@@ -191,12 +192,21 @@ def parse_task(
             pass
 
     encoded_limit = 2 * composition.max_inline_media_bytes
+    audio_instruction_refs: list[str] = []
+    has_user_text = False
     for message in conversation.messages:
         parts = (
             [TextPart(type="text", text=message.content)]
             if isinstance(message.content, str)
             else message.content
         )
+        if message.role == "user":
+            audio_instruction_refs = []
+            has_user_text = any(
+                isinstance(part, TextPart) and bool(part.text.strip()) for part in parts
+            )
+        else:
+            pass
         for part in parts:
             if isinstance(part, TextPart):
                 add_line(f"[{message.role}] {part.text}")
@@ -208,6 +218,10 @@ def parse_task(
                     media,
                     message.role,
                 )
+                if message.role == "user" and media.kind == "audio":
+                    audio_instruction_refs.append(f"user_audio_{media_counts['audio']}")
+                else:
+                    pass
     if parsed_options.image_base64 is not None:
         if len(parsed_options.image_base64) > encoded_limit:
             raise ValueError("Input media exceeds the composition byte limit")
@@ -222,6 +236,12 @@ def parse_task(
     text = "\n".join(lines)
     if len(text.encode("utf-8")) > MAX_TASK_TEXT_BYTES:
         raise ValueError(f"Composition task text exceeds {MAX_TASK_TEXT_BYTES} bytes")
+    elif (
+        composition.audio_instruction_capability is not None
+        and not has_user_text
+        and len(audio_instruction_refs) > 1
+    ):
+        raise ValueError("A voice instruction must contain exactly one audio clip")
     else:
         return ClientTask(
             options=parsed_options,
@@ -229,4 +249,11 @@ def parse_task(
             content=content,
             text=text,
             artifacts=artifacts,
+            audio_instruction_ref=(
+                audio_instruction_refs[0]
+                if composition.audio_instruction_capability is not None
+                and not has_user_text
+                and audio_instruction_refs
+                else None
+            ),
         )

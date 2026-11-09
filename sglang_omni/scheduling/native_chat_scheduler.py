@@ -614,7 +614,7 @@ def native_chat_server_kwargs(
         raise ValueError("Set the native chat model and GPU through Omni placement")
     else:
         pass
-    if kwargs.get("reasoning_parser") or kwargs.get("tool_call_parser"):
+    if kwargs.get("tool_call_parser"):
         raise ValueError("The Omni text result requires native text output")
     else:
         pass

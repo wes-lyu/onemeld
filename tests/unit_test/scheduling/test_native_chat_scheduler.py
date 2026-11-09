@@ -421,6 +421,30 @@ def test_native_sizes_the_stage_unless_its_config_does():
         assert kwargs.get("mem_fraction_static") == expected
 
 
+def test_reasoning_parser_preserves_only_final_content_for_composition() -> None:
+    """A reasoning planner must reach SRT without mixing analysis into its JSON."""
+    kwargs = native_chat_server_kwargs("checkpoint", 0, {"reasoning_parser": "qwen3"})
+    assert kwargs["reasoning_parser"] == "qwen3"
+    response = JSONResponse(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"operations": []}',
+                        "reasoning_content": "Intermediate analysis is not the plan.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"completion_tokens": 40, "reasoning_tokens": 30},
+        }
+    )
+    result = native_chat_scheduler.collect_response(response)
+    assert result["text"] == '{"operations": []}'
+    assert result["finish_reason"] == "stop"
+    assert result["usage"]["reasoning_tokens"] == 30
+
+
 def test_native_scheduler_receives_concurrent_requests_on_one_loop():
     with running() as (scheduler, _, chat):
         for rid in ("r1", "r2", "r3"):

@@ -1,0 +1,28 @@
+{
+  "model": "onemeld",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "生成两张猫咪照片，分别按清晰度、主体完整性和构图评分，推荐一张并说明原因。同分优先选清晰度更高的。"
+        }
+      ]
+    }
+  ],
+  "modalities": [
+    "text",
+    "image"
+  ],
+  "stream": false,
+  "max_completion_tokens": 1024,
+  "seed": 42,
+  "stage_params": {
+    "orchestrator": {
+      "width": 512,
+      "height": 512,
+      "steps": 20
+    }
+  }
+}

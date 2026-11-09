@@ -13,6 +13,12 @@ from sglang_omni.client.client import Client
 from sglang_omni.client.image_media import InlineImage, InlineMedia
 from sglang_omni.client.types import GenerateRequest, Message, SamplingParams
 from sglang_omni.pipeline.umm import UMMController, UMMPlanningError
+from sglang_omni.pipeline.umm_contract import (
+    UMMTaskContract,
+    UMMTaskOperation,
+    compile_task_contract,
+    text_image_task_bindings,
+)
 from sglang_omni.pipeline.umm_plan import (
     UMMCompositionSpec,
     UMMExecutionPlan,
@@ -78,6 +84,135 @@ def audio_task(speech_wav: bytes, mode: str) -> OmniRequest:
             stage_params={"orchestrator": {"mode": mode, "steps": 4}},
         )
     )
+
+
+@pytest.mark.parametrize("voice_instruction", [True, False])
+def test_voice_instruction_is_transcribed_before_the_only_plan(
+    composition: UMMCompositionSpec,
+    speech_wav: bytes,
+    voice_instruction: bool,
+) -> None:
+    """Only audio-only instructions need transcription before the planner can act."""
+    composition = composition.model_copy(
+        update={
+            "audio_instruction_capability": "transcribe",
+            "max_plan_attempts": 1,
+        }
+    )
+    controller = build_controller(composition)
+    stages = FakeStages(controller, "voice")
+    request = audio_task(speech_wav, "plan")
+    if voice_instruction:
+        request.inputs[0]["content"] = request.inputs[0]["content"][1:]
+    else:
+        pass
+    stages.submit(request)
+    if voice_instruction:
+        assert set(stages.held) == {"asr_worker"}
+        assert stages.held["asr_worker"].request.inputs["audio_bytes"] == speech_wav
+        stages.reply("asr_worker", {"text": "What is two plus three?"})
+        planner_content = stages.held["planning_worker"].request.inputs
+        assert "What is two plus three?" in json.dumps(planner_content)
+        assert "user_audio_1" not in json.dumps(planner_content)
+    else:
+        assert set(stages.held) == {"planning_worker"}
+    stages.reply(
+        "planning_worker", plan_reply(planned(call("answer", "inspect"), True))
+    )
+    answer_request = stages.held["vision_worker"].request.inputs
+    if voice_instruction:
+        assert "What is two plus three?" in json.dumps(answer_request)
+    else:
+        assert "Draw what I say" in json.dumps(answer_request)
+    stages.reply("vision_worker", {"text": "5"})
+    assert [segment["data"] for segment in stages.segments()] == ["5"]
+    assert not controller.adapter.executions
+
+
+@pytest.mark.parametrize("outcome", ["empty", "abort"])
+def test_voice_transcription_failure_never_enters_planning(
+    composition: UMMCompositionSpec,
+    speech_wav: bytes,
+    outcome: str,
+) -> None:
+    composition = composition.model_copy(
+        update={"audio_instruction_capability": "transcribe"}
+    )
+    controller = build_controller(composition)
+    stages = FakeStages(controller, "voice-failure")
+    request = audio_task(speech_wav, "plan")
+    request.inputs[0]["content"] = request.inputs[0]["content"][1:]
+    stages.submit(request)
+    assert set(stages.held) == {"asr_worker"}
+    if outcome == "empty":
+        stages.reply("asr_worker", {"text": "  "})
+        assert "planning_worker" not in stages.held
+        assert "no transcription" in str(controller.outbox.get_nowait().data)
+    else:
+        controller.abort("voice-failure")
+    assert not controller.adapter.executions
+
+
+def test_serial_composition_waits_for_an_independent_stage(
+    composition: UMMCompositionSpec,
+    inline_images: list[InlineImage],
+) -> None:
+    controller = build_controller(
+        composition.model_copy(update={"max_concurrent_steps": 1})
+    )
+    stages = FakeStages(controller, "serial")
+    stages.submit(OmniRequest(inputs="Draw and answer"))
+    stages.reply(
+        "planning_worker",
+        plan_reply(
+            planned(call("picture", "paint"), True),
+            planned(call("answer", "inspect"), True),
+        ),
+    )
+    assert set(stages.held) == {"image_a"}
+    stages.reply("image_a", media_result(inline_images[0]))
+    assert set(stages.held) == {"vision_worker"}
+    stages.reply("vision_worker", {"text": "Finished"})
+    assert [segment["kind"] for segment in stages.segments()] == ["image", "text"]
+
+
+def test_base64_image_stages_preserve_seeds_and_feed_the_vision_stage(
+    composition: UMMCompositionSpec,
+    inline_images: list[InlineImage],
+) -> None:
+    """String-prompt stages must retain per-image seeds and publish inspectable media."""
+    composition.capabilities["paint"].protocol = "image_base64"
+    controller = build_controller(composition)
+    stages = FakeStages(controller, "base64-images")
+    stages.submit(OmniRequest("Draw two cats", metadata={"composition": {"seed": 42}}))
+    stages.reply(
+        "planning_worker",
+        plan_reply(
+            planned(call("first", "paint"), True),
+            planned(call("second", "paint"), True),
+            planned(call("compare", "inspect", "first", "second"), True),
+        ),
+    )
+    for index, stage in enumerate(("image_a", "image_b")):
+        request = stages.held[stage].request
+        assert isinstance(request.inputs, str)
+        assert request.params["seed"] == 42 + index
+        assert request.params["n"] == 1
+        stages.reply(
+            stage,
+            {"modality": "image", "image_b64": inline_images[index].encoded_content()},
+        )
+    content = stages.held["vision_worker"].request.inputs[-1]["content"]
+    assert [
+        part["image_url"]["url"] for part in content if part["type"] == "image_url"
+    ] == [image.url for image in inline_images[:2]]
+    stages.reply("vision_worker", {"text": "The first cat"})
+    assert [segment["kind"] for segment in stages.segments()] == [
+        "image",
+        "image",
+        "text",
+    ]
+    assert not controller.adapter.executions
 
 
 @pytest.mark.parametrize("mode", ["plan", "iterative"])
@@ -479,3 +614,204 @@ def test_abort_with_parallel_steps_in_flight_releases_the_execution(
     with pytest.raises(RuntimeError, match="inactive request"):
         stages.reply("image_a", media_result(inline_images[0]))
     assert not controller.contexts
+
+
+@pytest.fixture
+def task_contract_composition(composition: UMMCompositionSpec) -> UMMCompositionSpec:
+    return UMMCompositionSpec.model_validate(
+        {
+            **composition.model_dump(mode="json"),
+            "allowed_modes": ["plan"],
+            "max_plan_attempts": 2,
+            "task_operations": {
+                name: binding.model_dump(mode="json")
+                for name, binding in text_image_task_bindings(
+                    "inspect", "paint"
+                ).items()
+            },
+            "review_plan": True,
+        }
+    )
+
+
+@pytest.fixture
+def task_contract() -> UMMTaskContract:
+    return UMMTaskContract(
+        interpretation="Write a design and generate two posters without lettering; return all results.",
+        publish=[0, 1],
+        operations=[
+            UMMTaskOperation(
+                operation="write_text",
+                source_text="Write a design",
+                constraints=["no lettering"],
+                count=1,
+                depends_on=[],
+                input_refs=[],
+            ),
+            UMMTaskOperation(
+                operation="generate_image",
+                source_text="generate two posters",
+                constraints=["no lettering"],
+                count=2,
+                depends_on=[0],
+                input_refs=[],
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize("publish_design", [False, True])
+@pytest.mark.parametrize("review_plan", [False, True])
+def test_contract_dispatch_preserves_constraints_with_optional_review(
+    task_contract_composition: UMMCompositionSpec,
+    task_contract: UMMTaskContract,
+    inline_images: list[InlineImage],
+    review_plan: bool,
+    publish_design: bool,
+) -> None:
+    """Review precedes execution; design, constraints and both outputs survive compilation."""
+    task_contract_composition = task_contract_composition.model_copy(
+        update={
+            "review_plan": review_plan,
+            "planning_temperature": 0.6,
+            "planning_chat_template_kwargs": {"enable_thinking": False},
+        }
+    )
+    task_contract.publish = [0, 1] if publish_design else [1]
+    stages = FakeStages(build_controller(task_contract_composition), "contract")
+    stages.submit(
+        OmniRequest(
+            "Write a design, then generate two posters with no lettering.",
+            params={"seed": 42},
+        )
+    )
+    assert stages.held["planning_worker"].request.params["temperature"] == 0.6
+    assert stages.held["planning_worker"].request.params["seed"] == 42
+    assert stages.held["planning_worker"].request.params["chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
+    stages.reply("planning_worker", {"text": task_contract.model_dump_json()})
+    if review_plan:
+        assert set(stages.held) == {"planning_worker"}
+        audit = stages.held["planning_worker"].request.inputs
+        assert "contract" in json.loads(audit[1]["content"])
+        stages.reply("planning_worker", {"text": '{"accepted":true,"violations":[]}'})
+    else:
+        pass
+    assert set(stages.held) == {"vision_worker"}
+    stages.reply("vision_worker", {"text": "A tree beside a stack of books."})
+    assert set(stages.held) == {"image_a", "image_b"}
+    for stage in ("image_a", "image_b"):
+        prompt = stages.held[stage].request.inputs["prompt"]
+        assert "no lettering" in prompt
+        assert "A tree beside a stack of books." in prompt
+        assert "Produce exactly one image" in prompt
+    stages.reply("image_a", media_result(inline_images[0]))
+    stages.reply("image_b", media_result(inline_images[1]))
+    assert [segment["kind"] for segment in stages.segments()] == (
+        ["text", "image", "image"] if publish_design else ["image", "image"]
+    )
+
+
+def test_contract_keeps_evaluation_constraints_out_of_image_prompts(
+    task_contract_composition: UMMCompositionSpec,
+    task_contract: UMMTaskContract,
+) -> None:
+    """Scoring instructions previously leaked into generated images as score sheets."""
+    task_contract.operations.append(
+        UMMTaskOperation(
+            operation="evaluate_images",
+            source_text="Score both images",
+            constraints=["use a ten-point scale"],
+            count=1,
+            depends_on=[1],
+            input_refs=[],
+        )
+    )
+    candidate = compile_task_contract(
+        task_contract_composition,
+        task_contract.model_dump_json(),
+        "Write a design, then generate two posters with no lettering. Score both images; use a ten-point scale.",
+        {},
+    )
+    for step in candidate.reply.steps[1:3]:
+        assert "no lettering" in step.instruction
+        assert "ten-point scale" not in step.instruction
+    assert "ten-point scale" in candidate.reply.steps[3].instruction
+    assert candidate.reply.steps[3].input_refs == ["operation_1_0", "operation_1_1"]
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_contract_rejection_has_bounded_repair_and_never_dispatches(
+    task_contract_composition: UMMCompositionSpec,
+    task_contract: UMMTaskContract,
+    accepted: bool,
+) -> None:
+    """A rejecting review, including contradictory acceptance, cannot launch a model task."""
+    stages = FakeStages(build_controller(task_contract_composition), "contract-repair")
+    stages.submit(
+        OmniRequest("Write a design, then generate two posters with no lettering.")
+    )
+    rejection = {
+        "text": json.dumps(
+            {"accepted": accepted, "violations": ["Missing a requested operation"]}
+        )
+    }
+    stages.reply("planning_worker", {"text": task_contract.model_dump_json()})
+    stages.reply("planning_worker", rejection)
+    assert set(stages.held) == {"planning_worker"}
+    stages.reply("planning_worker", {"text": task_contract.model_dump_json()})
+    stages.reply("planning_worker", rejection)
+    error = stages.controller.outbox.get_nowait()
+    assert error.type == "error"
+    assert "after 2 planner attempts" in str(error.data)
+    assert not stages.held
+    assert not stages.controller.contexts
+    assert not stages.controller.adapter.executions
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "self_reference",
+        "invented_source",
+        "invented_constraint",
+        "image_to_generator",
+        "text_count",
+        "unknown_operation",
+        "unknown_publish",
+        "duplicate_publish",
+        "negative_publish",
+    ],
+)
+def test_contract_rejects_invalid_source_and_dependencies(
+    task_contract_composition: UMMCompositionSpec,
+    task_contract: UMMTaskContract,
+    failure: str,
+) -> None:
+    """Reject planner errors before compiling a runnable capability graph."""
+    if failure == "self_reference":
+        task_contract.operations[1].depends_on = [1]
+    elif failure == "invented_source":
+        task_contract.operations[1].source_text = "deliberately poor composition"
+    elif failure == "invented_constraint":
+        task_contract.operations[1].constraints = ["add a slogan"]
+    elif failure == "image_to_generator":
+        task_contract.operations[1].input_refs = ["user_image_1"]
+    elif failure == "text_count":
+        task_contract.operations[0].count = 2
+    elif failure == "unknown_publish":
+        task_contract.publish = [2]
+    elif failure == "duplicate_publish":
+        task_contract.publish = [1, 1]
+    elif failure == "negative_publish":
+        task_contract.publish = [-1]
+    else:
+        task_contract.operations[1].operation = "unknown"
+    with pytest.raises(ValueError):
+        compile_task_contract(
+            task_contract_composition,
+            task_contract.model_dump_json(),
+            "Write a design, then generate two posters with no lettering.",
+            {"user_image_1": "image"},
+        )

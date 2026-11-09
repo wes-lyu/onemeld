@@ -1,0 +1,51 @@
+config_cls: QwenSenseNovaSpeechPlanPipelineConfig
+model_path: SenseNova/SenseNova-U1.5-8B-MoT
+text_model_path: Qwen/Qwen2.5-VL-3B-Instruct
+asr_model_path: Qwen/Qwen3-ASR-0.6B
+stages:
+  orchestrator:
+    factory:
+      max_active: 4
+  understanding:
+    gpu: 0
+    gpu_memory_fraction: 0.18
+    engine:
+      mem_fraction_static: 0.18
+      max_total_tokens: 4096
+      context_length: 8192
+      max_running_requests: 1
+      chunked_prefill_size: 256
+      disable_overlap_schedule: true
+      attention_backend: triton
+      disable_cuda_graph: true
+  generation:
+    gpu: 0
+    gpu_memory_fraction: 0.74
+    factory:
+      dtype: bfloat16
+      cooperative_cancellation: true
+      enable_cache_dit: true
+      cache_dit_params:
+        Fn_compute_blocks: 1
+        Bn_compute_blocks: 0
+        max_warmup_steps: 4
+        residual_diff_threshold: 0.1
+        max_continuous_cached_steps: 2
+      max_batch_size: 1
+      dit_layerwise_offload: true
+      dit_offload_prefetch_size: 1
+      dit_layerwise_resident_layers: 30
+      dit_layerwise_residency_policy: leading
+      pin_cpu_memory: true
+  asr:
+    gpu: 0
+    gpu_memory_fraction: 0.06
+    factory:
+      max_running_requests: 1
+      max_audio_clip_s: 30
+      enable_encoder_cuda_graph: false
+      mem_fraction_static: 0.65
+      server_args_overrides:
+        disable_cuda_graph: true
+        attention_backend: triton
+        max_total_tokens: 1024

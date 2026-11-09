@@ -6,7 +6,7 @@ so these configurations import nothing from the ASR and TTS model packages.
 """
 
 from collections.abc import Mapping
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
@@ -19,6 +19,7 @@ from sglang_omni.pipeline.umm import (
     STREAM_DONE_FN_PATH,
     UMMPipelineConfig,
 )
+from sglang_omni.pipeline.umm_contract import text_image_task_bindings
 from sglang_omni.pipeline.umm_plan import (
     ExecutionMode,
     UMMCapability,
@@ -187,26 +188,73 @@ def capability_stages(name: str) -> list[StageConfig]:
 
 
 def qwen_stages(
-    capability_names: tuple[str, ...], execution_mode: ExecutionMode
+    capability_names: tuple[str, ...],
+    execution_mode: ExecutionMode,
+    *,
+    speech_instructions: bool = False,
+    task_contract: bool = False,
+    planner_stage: str = "understanding",
+    image_protocol: Literal["native_image", "image_base64"] = "native_image",
+    image_factory_path: str = GENERATION_FACTORY_PATH,
 ) -> list[StageConfig]:
     """The controller, output relay and native stages of the named capabilities.
 
-    Qwen-VL plans on the understanding stage, so respond is always included.
+    Visual tasks use respond; planning can share that stage or use its own.
     """
     names = ("respond", *capability_names)
+    capabilities = {name: CAPABILITIES[name] for name in names}
+    if "generate_image" in capabilities:
+        capabilities["generate_image"] = GENERATE_IMAGE.model_copy(
+            update={"protocol": image_protocol}
+        )
+    else:
+        pass
     composition = UMMCompositionSpec(
-        planner_stage="understanding",
-        capabilities={name: CAPABILITIES[name] for name in names},
-        plan_examples=[BICYCLE_EXAMPLE] if "generate_image" in names else [],
+        planner_stage=planner_stage,
+        capabilities=capabilities,
+        task_operations=(
+            text_image_task_bindings("respond", "generate_image")
+            if task_contract
+            else {}
+        ),
+        plan_examples=(
+            [BICYCLE_EXAMPLE]
+            if execution_mode == "iterative" and "generate_image" in names
+            else []
+        ),
         execution_mode=execution_mode,
-        allowed_modes=["plan", "iterative"],
+        allowed_modes=(
+            ["plan"] if speech_instructions or task_contract else ["plan", "iterative"]
+        ),
         max_planner_turns=4,
-        max_steps=8,
-        max_plan_attempts=2,
+        max_steps=6 if speech_instructions else 8,
+        max_plan_attempts=1 if speech_instructions and not task_contract else 2,
+        max_images=2 if speech_instructions else 4,
+        audio_instruction_capability="transcribe" if speech_instructions else None,
+        max_concurrent_steps=1 if speech_instructions else None,
         max_videos=0,
         trace=True,
     )
     stages = [stage for name in names for stage in capability_stages(name)]
+    if planner_stage != "understanding":
+        stages.append(
+            EngineStageConfig(
+                name=planner_stage,
+                process=planner_stage,
+                factory_path=CHAT_FACTORY_PATH,
+                allow_child_processes=True,
+                factory=FactoryArgs(stage_name=planner_stage),
+                gpu=0,
+                next="orchestrator",
+            )
+        )
+    else:
+        pass
+    for stage in stages:
+        if stage.name == "generation":
+            stage.factory_path = image_factory_path
+        else:
+            pass
     phase_entries = [
         stage.name for stage in stages if stage.name not in ("tts_engine", "vocoder")
     ]
@@ -258,7 +306,10 @@ class QwenUMMPipelineConfig(UMMPipelineConfig):
     def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
         if stage_name == "understanding":
             return {"model_path": self.text_model_path}
-        elif stage_name == "generation":
+        elif (
+            stage_name == "generation"
+            and self.stage_named(stage_name).factory_path == GENERATION_FACTORY_PATH
+        ):
             return {"inline_media": True}
         else:
             return super().stage_factory_kwargs(stage_name)
@@ -281,6 +332,102 @@ class QwenSpeechInPipelineConfig(QwenUMMPipelineConfig):
             return {"model_path": self.asr_model_path}
         else:
             return super().stage_factory_kwargs(stage_name)
+
+
+class QwenSpeechPlanPipelineConfig(QwenSpeechInPipelineConfig):
+    """Transcribe voice instructions before one upfront, serial execution plan."""
+
+    architecture: ClassVar[str] = "QwenUMMSpeechPlan"
+    name: str = "qwen_umm_speech_plan"
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(
+            ("generate_image", "transcribe"), "plan", speech_instructions=True
+        )
+    )
+
+
+class QwenSenseNovaSpeechPlanPipelineConfig(QwenSpeechPlanPipelineConfig):
+    """Qwen speech and planning with SenseNova image generation."""
+
+    architecture: ClassVar[str] = "QwenSenseNovaSpeechPlan"
+    name: str = "qwen_sensenova_speech_plan"
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(
+            ("generate_image", "transcribe"),
+            "plan",
+            speech_instructions=True,
+            image_protocol="image_base64",
+            image_factory_path="sglang_omni.models.sensenova_u1.stages.create_generation_executor",
+        )
+    )
+
+
+class QwenSenseNovaSpeechContractPipelineConfig(QwenSenseNovaSpeechPlanPipelineConfig):
+    """Validate task contracts before executing text and image operations."""
+
+    architecture: ClassVar[str] = "QwenSenseNovaSpeechContract"
+    name: str = "qwen_sensenova_speech_contract"
+    text_model_path: str = "Qwen/Qwen3-VL-8B-Instruct"
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(
+            ("generate_image", "transcribe"),
+            "plan",
+            speech_instructions=True,
+            task_contract=True,
+            image_protocol="image_base64",
+            image_factory_path="sglang_omni.models.sensenova_u1.stages.create_generation_executor",
+        )
+    )
+
+
+class QwenSenseNovaSpeechReasoningPipelineConfig(
+    QwenSenseNovaSpeechContractPipelineConfig
+):
+    """Separate text planning from visual understanding and image generation."""
+
+    architecture: ClassVar[str] = "QwenSenseNovaSpeechReasoning"
+    name: str = "qwen_sensenova_speech_reasoning"
+    planner_model_path: str = "Qwen/Qwen3-4B"
+    text_model_path: str = "Qwen/Qwen3-VL-4B-Instruct"
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "understanding": EngineStageConfig,
+        "planning": EngineStageConfig,
+    }
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(
+            ("generate_image", "transcribe"),
+            "plan",
+            speech_instructions=True,
+            task_contract=True,
+            planner_stage="planning",
+            image_protocol="image_base64",
+            image_factory_path="sglang_omni.models.sensenova_u1.stages.create_generation_executor",
+        )
+    )
+
+    def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
+        if stage_name == "planning":
+            return {"model_path": self.planner_model_path}
+        else:
+            return super().stage_factory_kwargs(stage_name)
+
+
+class OneMeldPipelineConfig(QwenSenseNovaSpeechReasoningPipelineConfig):
+    """Serve text, image and spoken requests through an upfront plan."""
+
+    architecture: ClassVar[str] = "OneMeld"
+    name: str = "onemeld"
+    planner_model_path: str = "Qwen/Qwen3.5-4B"
+    stages: list[StageConfig] = Field(
+        default_factory=lambda: qwen_stages(
+            ("generate_image", "transcribe"),
+            "plan",
+            speech_instructions=True,
+            planner_stage="planning",
+            image_protocol="image_base64",
+            image_factory_path="sglang_omni.models.sensenova_u1.stages.create_generation_executor",
+        )
+    )
 
 
 class QwenEditPipelineConfig(QwenUMMPipelineConfig):
@@ -356,6 +503,11 @@ class QwenAnyToAnyEditPipelineConfig(QwenAnyToAnyPipelineConfig):
 
 EntryClass = QwenUMMPipelineConfig
 Variants = {
+    "onemeld": OneMeldPipelineConfig,
+    "sensenova_speech_reasoning": QwenSenseNovaSpeechReasoningPipelineConfig,
+    "sensenova_speech_plan": QwenSenseNovaSpeechPlanPipelineConfig,
+    "sensenova_speech_contract": QwenSenseNovaSpeechContractPipelineConfig,
+    "speech_plan": QwenSpeechPlanPipelineConfig,
     "speech_in": QwenSpeechInPipelineConfig,
     "edit": QwenEditPipelineConfig,
     "any_to_any": QwenAnyToAnyPipelineConfig,

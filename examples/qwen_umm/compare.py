@@ -40,14 +40,20 @@ def main() -> None:
     )
     parser.add_argument("--image", type=Path, action="append", default=[])
     parser.add_argument("--audio", type=Path, action="append", default=[])
+    parser.add_argument("--voice-instruction", action="store_true")
     parser.add_argument("--mode", choices=["plan", "iterative"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--steps", type=int, default=20)
     arguments = parser.parse_args()
     arguments.output_dir.mkdir(parents=True, exist_ok=True)
-    content: list[dict[str, str | dict[str, str]]] = [
-        {"type": "text", "text": arguments.prompt}
-    ]
+    if arguments.voice_instruction and len(arguments.audio) != 1:
+        parser.error("--voice-instruction requires exactly one --audio file")
+    else:
+        content: list[dict[str, str | dict[str, str]]] = (
+            []
+            if arguments.voice_instruction
+            else [{"type": "text", "text": arguments.prompt}]
+        )
     for path in arguments.image:
         mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")

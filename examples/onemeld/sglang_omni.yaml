@@ -1,0 +1,88 @@
+# The serve.yaml profile with speech transcription on an SGLang-Omni pipeline.
+# Install: uv pip install -e ".[sglang,sglang-omni]"
+model_name: onemeld
+
+backends:
+  planning:
+    framework: sglang
+    task: chat
+    model: Qwen/Qwen3.5-4B
+    gpu: 0
+    args:
+      mem_fraction_static: 0.23
+      max_total_tokens: 4096
+      context_length: 8192
+      max_running_requests: 2
+      chunked_prefill_size: 256
+      disable_overlap_schedule: true
+      attention_backend: triton
+      disable_cuda_graph: true
+      max_mamba_cache_size: 32
+  understanding:
+    framework: sglang
+    task: chat
+    model: Qwen/Qwen3-VL-4B-Instruct
+    gpu: 0
+    args:
+      mem_fraction_static: 0.22
+      max_total_tokens: 4096
+      context_length: 8192
+      max_running_requests: 4
+      chunked_prefill_size: 256
+      disable_overlap_schedule: true
+      attention_backend: triton
+      disable_cuda_graph: true
+  generation:
+    framework: sglang
+    task: image
+    model: sensenova/SenseNova-U1.5-8B-MoT
+    gpu: 0
+    env:
+      # SGLang-Omni provides the SenseNova diffusion pipeline.
+      SGLANG_EXTERNAL_MODEL_PACKAGE: sglang_omni.models.sensenova_u1.native
+  asr:
+    framework: sglang_omni
+    task: transcription
+    model: Qwen/Qwen3-ASR-0.6B
+    gpu: 0
+
+composition:
+  planner_stage: planning
+  capabilities:
+    respond:
+      stages: [understanding]
+      protocol: native_chat
+      description: Answer text questions, or inspect and compare referenced images, including scores and a visible reason for a winner when requested.
+      input_kinds: [text, image]
+      parameters:
+        temperature: 0.0
+    generate_image:
+      stages: [generation]
+      protocol: image_base64
+      description: Generate exactly one image from a visual prompt. Use separate calls for separate requested images.
+      input_kinds: [text]
+      parameters:
+        width: 512
+        height: 512
+        num_inference_steps: 20
+        guidance_scale: 4.0
+    transcribe:
+      stages: [asr]
+      protocol: asr
+      description: Transcribe one referenced speech recording of at most 30 seconds into text.
+      input_kinds: [audio]
+  max_steps: 6
+  max_plan_attempts: 2
+  max_images: 2
+  audio_instruction_capability: transcribe
+  max_concurrent_steps: 1
+  planner_media_kinds: []
+  planning_temperature: 0.0
+  planning_max_new_tokens: 1536
+  planning_chat_template_kwargs:
+    enable_thinking: false
+  trace: true
+
+limits:
+  max_active: 4
+  timeout_s: 1800.0

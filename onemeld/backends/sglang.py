@@ -6,7 +6,6 @@ import json
 import logging
 import threading
 from collections.abc import Coroutine
-from functools import partial
 
 from pydantic import JsonValue
 from sglang import Engine
@@ -71,6 +70,15 @@ def response_body(response: ServingResponse) -> dict[str, JsonValue]:
         return response.model_dump()
 
 
+async def cancel_engine_tasks(engine: Engine) -> None:
+    """Abort native requests and end the engine loop's own tasks before it stops."""
+    engine.tokenizer_manager.abort_request(abort_all=True)
+    tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class EngineHost:
     """One sglang.Engine and the thread that runs its event loop."""
 
@@ -126,10 +134,12 @@ class EngineHost:
             return
         else:
             pass
-        engine.loop.call_soon_threadsafe(
-            partial(engine.tokenizer_manager.abort_request, abort_all=True)
-        )
         try:
+            await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(
+                    cancel_engine_tasks(engine), engine.loop
+                )
+            )
             engine.shutdown()
         finally:
             engine.loop.call_soon_threadsafe(engine.loop.stop)
@@ -287,6 +297,10 @@ class SGLangImageBackend:
         sampling = {
             "prompt": request.inputs,
             **{name: value for name, value in request.params.items() if name != "n"},
+            # Keep the image in memory: by default the generator writes it to
+            # outputs/ and returns only the file path.
+            "save_output": False,
+            "return_file_paths_only": False,
         }
         async with self.lock:
             result = await asyncio.to_thread(

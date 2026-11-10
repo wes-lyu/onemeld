@@ -672,7 +672,6 @@ class OmniScheduler(Generic[RequestDataT]):
         bridge = SGLangExecutionBridge(
             device=torch.device(self.device),
             worker=self.tp_worker,
-            spec_algorithm=SpeculativeAlgorithm.NONE,
             future_map=self.future_map,
         )
         model_runner.async_enabled = self.enable_async_decode

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -36,10 +36,6 @@ if TYPE_CHECKING:
     from sglang_omni.model_runner.model_worker import ModelWorker
 else:
     pass
-
-
-class SpeculativeAlgorithm(Protocol):
-    def is_none(self) -> bool: ...
 
 
 def attn_forward_context(
@@ -73,17 +69,10 @@ class SGLangExecutionBridge:
         *,
         device: torch.device,
         worker: "ModelWorker",
-        spec_algorithm: SpeculativeAlgorithm,
         future_map: "FutureMap",
     ) -> None:
         from sglang.srt.managers.overlap_utils import RelayPayload
 
-        if not spec_algorithm.is_none():
-            raise NotImplementedError(
-                "Omni's SGLang execution bridge does not support speculative decoding"
-            )
-        else:
-            pass
         self.device = device
         self.worker = worker
         self.runner = worker.model_runner

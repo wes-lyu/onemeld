@@ -543,9 +543,6 @@ class SGLModelRunner(ModelRunner):
         deferred graph-capture call sites, so finalize here at the common
         capture boundary instead of relying on every stage to mirror the
         scheduler's post-capture hook.
-
-        On XPU the capture is wrapped to pin SDPA, which the engines reach through
-        model code SGLang's capture does not wrap.
         """
         record = self.weight_share_record
         if record is not None:

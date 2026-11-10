@@ -136,12 +136,8 @@ class Qwen3ASRPreLMEncoderService(
         self.device = reference.device
         self.dtype = reference.dtype
         self.hidden_size = text_hidden_size(model)
-        # Keep encoder submissions off the generation lane on Ascend, where the
-        # decode graph replay and update threads can otherwise stall behind it.
         self.stream = (
-            create_device_stream(self.device)
-            if self.device.type in {"cuda", "npu"}
-            else None
+            create_device_stream(self.device) if self.device.type == "cuda" else None
         )
         self.cache = StageOutputCache(
             max_size=cache_max_entries,

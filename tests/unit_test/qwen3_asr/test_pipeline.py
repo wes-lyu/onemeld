@@ -184,65 +184,6 @@ def test_qwen3_asr_explicit_mm_attention_backend_overrides_sm_default(
 
 
 @pytest.mark.parametrize(
-    ("is_rocm", "gfx95_supported", "hip_version", "expected_backend"),
-    [
-        (True, True, (7, 2, 0), "triton"),
-        (False, True, (7, 2, 0), None),
-        (True, False, (7, 2, 0), None),
-        (True, True, (7, 1, 0), None),
-        (True, True, (7, 3, 0), None),
-    ],
-)
-def test_qwen3_asr_defaults_prefill_to_triton_only_on_rocm_72_gfx95(
-    monkeypatch: pytest.MonkeyPatch,
-    is_rocm: bool,
-    gfx95_supported: bool,
-    hip_version: tuple[int, int, int],
-    expected_backend: str | None,
-) -> None:
-    monkeypatch.setattr(
-        qwen3_asr_builder.current_platform,
-        "is_rocm",
-        lambda: is_rocm,
-    )
-    monkeypatch.setattr(
-        qwen3_asr_builder,
-        "is_gfx95_supported",
-        lambda: gfx95_supported,
-    )
-    monkeypatch.setattr(
-        qwen3_asr_builder,
-        "get_hip_version",
-        lambda: hip_version,
-    )
-
-    defaults = make_engine_builder(mm_attention_backend="fa3").generation_defaults(
-        dtype="bfloat16"
-    )
-
-    if expected_backend is None:
-        assert "prefill_attention_backend" not in defaults
-    else:
-        assert defaults["prefill_attention_backend"] == expected_backend
-
-
-def test_qwen3_asr_explicit_prefill_backend_overrides_rocm_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(qwen3_asr_builder.current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(qwen3_asr_builder, "is_gfx95_supported", lambda: True)
-    monkeypatch.setattr(qwen3_asr_builder, "get_hip_version", lambda: (7, 2, 0))
-    builder = make_engine_builder(mm_attention_backend="fa3")
-
-    overrides = build_generation_batch_overrides(
-        **builder.generation_defaults(dtype="bfloat16"),
-        server_args_overrides={"prefill_attention_backend": "aiter"},
-    )
-
-    assert overrides["prefill_attention_backend"] == "aiter"
-
-
-@pytest.mark.parametrize(
     ("batch_size", "wait_ms", "match"),
     [
         (0, 4, "pre_lm_max_batch_size"),

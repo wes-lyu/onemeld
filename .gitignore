@@ -60,13 +60,3 @@ asr_seedtts_results.json
 target/
 
 /task.md
-/test_minimax_music3.py
-/test_minimax_music3_acoustic.py
-
-# XPU installer lock/backup
-.pyproject.xpu.lock
-.pyproject.cuda.bak
-
-# CPU installer lock/backup
-.pyproject.cpu.lock
-.pyproject.cpu.bak

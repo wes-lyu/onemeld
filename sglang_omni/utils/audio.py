@@ -45,7 +45,7 @@ def check_torchcodec_ready() -> bool:
     """Whether the torchcodec decoder backend can be imported and loaded.
 
     torchaudio 2.10+ delegates decoding to torchcodec. CPU-only torch images
-    (e.g. Ascend NPU containers) may ship torchcodec wheels that cannot load
+    may ship torchcodec wheels that cannot load
     because they link CUDA-only libraries (libnvrtc/libc10_cuda); in that case
     audio decoding falls back to the soundfile backend.
     """

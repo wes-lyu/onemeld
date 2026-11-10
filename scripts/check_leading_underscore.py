@@ -47,22 +47,6 @@ ALLOWED_DEFS: frozenset[tuple[str, str]] = frozenset(
         ("sglang_omni/scheduling/threaded_simple_scheduler.py", "_init"),
         ("sglang_omni/scheduling/threaded_simple_scheduler.py", "_put"),
         ("sglang_omni/scheduling/threaded_simple_scheduler.py", "_get"),
-        # HuggingFace PreTrainedModel
-        (
-            "sglang_omni/models/ming_omni/talker/audio_vae/modeling_audio_vae.py",
-            "_init_weights",
-        ),
-        (
-            "sglang_omni/models/fishaudio_s2_pro/fish_speech/models/dac/rvq.py",
-            "_init_weights",
-        ),
-        # torch.nn.Conv1d
-        (
-            "sglang_omni/models/minicpm_o/components/token2wav/speech_tokenizer_model.py",
-            "_conv_forward",
-        ),
-        # torch.nn.Module._buffers
-        ("sglang_omni/models/qwen3_tts/codec_state_arena.py", "_buffers"),
         # SGLang ModelRunner / Scheduler / cache hooks
         ("sglang_omni/model_runner/sglang_model_runner.py", "_extend_forward_kwargs"),
         (
@@ -71,7 +55,6 @@ ALLOWED_DEFS: frozenset[tuple[str, str]] = frozenset(
         ),
         ("sglang_omni/model_runner/sglang_model_runner.py", "_profile_available_bytes"),
         ("sglang_omni/scheduling/omni_scheduler.py", "_add_request_to_queue"),
-        ("sglang_omni/scheduling/pd_scheduler.py", "_add_request_to_queue"),
         (
             "sglang_omni/scheduling/sglang_backend/evict_heap_radix_cache.py",
             "_update_leaf_status",
@@ -79,37 +62,11 @@ ALLOWED_DEFS: frozenset[tuple[str, str]] = frozenset(
         # OmniPlatform hook kept to avoid infinite recursion
         ("sglang_omni/platforms/interface.py", "_get_device_graph_backend"),
         ("sglang_omni/platforms/cuda.py", "_get_device_graph_backend"),
-        ("sglang_omni/platforms/rocm.py", "_get_device_graph_backend"),
-        ("sglang_omni/platforms/npu.py", "_get_device_graph_backend"),
-        ("sglang_omni/platforms/xpu.py", "_get_device_graph_backend"),
         # Same-scope public name already exists
         ("sglang_omni/scheduling/omni_scheduler.py", "_run_batch"),
-        ("sglang_omni/models/minimax_music3/dit.py", "_transformer"),
-        ("sglang_omni/models/qwen3_tts/reference_encoder_cuda_graph.py", "_encode"),
-        ("sglang_omni/models/qwen3_omni/components/code2wav_cuda_graph.py", "_build"),
         # Remaining production exceptions carried from the rename
-        ("sglang_omni/scheduling/dllm_scheduler.py", "_event_loop"),
-        ("sglang_omni/mps/runtime.py", "_start"),
-        ("sglang_omni/mps/runtime.py", "_verify"),
-        ("sglang_omni/mps/runtime.py", "_retire_process_clients"),
-        ("sglang_omni/mps/runtime.py", "_probe_failures"),
-        ("sglang_omni/mps/runtime.py", "_close"),
         ("sglang_omni/preprocessing/resource_connector.py", "_assert_url_allowed"),
         ("sglang_omni/config/placement.py", "_resolve_stage_gpu_ids"),
-        (
-            "sglang_omni/models/moss_transcribe_diarize/encoder_service.py",
-            "_lookup_cached_embedding",
-        ),
-        ("sglang_omni/models/ming_tts/sglang_model.py", "_is_layer_sparse"),
-        ("sglang_omni/models/dots_tts/tail.py", "_log_graph_counters"),
-        (
-            "sglang_omni/models/fishaudio_s2_pro/streaming_vocoder.py",
-            "_build_stream_vocoder_chunk",
-        ),
-        (
-            "sglang_omni/models/fishaudio_s2_pro/streaming_vocoder.py",
-            "_is_streaming_payload",
-        ),
     }
 )
 

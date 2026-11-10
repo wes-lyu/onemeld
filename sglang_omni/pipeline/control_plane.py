@@ -10,8 +10,6 @@ import zmq.asyncio
 
 from sglang_omni.proto import (
     AbortMessage,
-    AdminMessage,
-    AdminResultMessage,
     CompleteMessage,
     DataAckMessage,
     DataReadyMessage,
@@ -28,9 +26,7 @@ from sglang_omni.proto import (
 
 logger = logging.getLogger(__name__)
 ControlMessage = (
-    AdminMessage
-    | AdminResultMessage
-    | DataAckMessage
+    DataAckMessage
     | DataReadyMessage
     | KVTransferPrepareMessage
     | KVTransferReadyMessage
@@ -317,8 +313,7 @@ class StageControlPlane:
     async def recv(
         self,
     ) -> (
-        AdminMessage
-        | DataAckMessage
+        DataAckMessage
         | DataReadyMessage
         | SubmitMessage
         | ShutdownMessage
@@ -342,7 +337,6 @@ class StageControlPlane:
                 FreezeGCMessage,
                 ProfilerStartMessage,
                 ProfilerStopMessage,
-                AdminMessage,
             ),
         ):
             return msg
@@ -374,14 +368,6 @@ class StageControlPlane:
 
     async def send_stream(self, msg: StreamMessage) -> None:
         """Send a stream chunk to coordinator."""
-        if self.coordinator_socket is None:
-            raise RuntimeError("Control plane not started")
-        else:
-            pass
-        await self.coordinator_socket.send(msg)
-
-    async def send_admin_result(self, msg: AdminResultMessage) -> None:
-        """Send an administrative result to coordinator."""
         if self.coordinator_socket is None:
             raise RuntimeError("Control plane not started")
         else:
@@ -446,7 +432,7 @@ class CoordinatorControlPlane:
         self,
         stage_name: str,
         stage_endpoint: str,
-        msg: SubmitMessage | AdminMessage | ShutdownMessage | FreezeGCMessage,
+        msg: SubmitMessage | ShutdownMessage | FreezeGCMessage,
     ) -> None:
         """Submit a request to a stage."""
         if stage_name not in self.stage_sockets:
@@ -457,26 +443,18 @@ class CoordinatorControlPlane:
             pass
         await self.stage_sockets[stage_name].send(msg)
 
-    async def recv_event(self) -> CompleteMessage | StreamMessage | AdminResultMessage:
+    async def recv_event(self) -> CompleteMessage | StreamMessage:
         """Receive completion or stream event from a stage."""
         if self.completion_socket is None:
             raise RuntimeError("Control plane not started")
         else:
             pass
         msg = await self.completion_socket.recv()
-        if isinstance(msg, (CompleteMessage, StreamMessage, AdminResultMessage)):
+        if isinstance(msg, (CompleteMessage, StreamMessage)):
             return msg
         else:
             pass
-        raise ValueError(
-            f"Expected CompleteMessage, StreamMessage, or AdminResultMessage, got {type(msg)}"
-        )
-
-    async def send_admin(
-        self, stage_name: str, stage_endpoint: str, msg: AdminMessage
-    ) -> None:
-        """Send an administrative operation to a stage."""
-        await self.submit_to_stage(stage_name, stage_endpoint, msg)
+        raise ValueError(f"Expected CompleteMessage or StreamMessage, got {type(msg)}")
 
     async def broadcast_abort(self, msg: AbortMessage) -> None:
         """Broadcast abort to all stages."""

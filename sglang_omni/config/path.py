@@ -516,17 +516,6 @@ def descend(container: object, part: str, *, raw: str, prefix: str) -> Segment:
             )
         else:
             pass
-        if part == "audio_chunking" and is_chunkless_pipeline(core):
-            raise ConfigPathError(
-                f"{core.__name__} does not support audio chunking: the "
-                "audio_chunking policy only exists on pipelines whose model "
-                "declares allow_audio_chunking, so there is nothing for "
-                "these settings to reach here",
-                raw=raw,
-                resolved_prefix=prefix,
-            )
-        else:
-            pass
         if part in fields:
             annotation = fields[part].annotation
             if fields[part].metadata:
@@ -744,15 +733,6 @@ def is_non_engine_stage(annotation: object) -> bool:
     )
 
 
-def is_chunkless_pipeline(annotation: object) -> bool:
-    return (
-        isinstance(annotation, type)
-        and get_origin(annotation) is None
-        and issubclass(annotation, PipelineConfig)
-        and not annotation.allow_audio_chunking
-    )
-
-
 def is_traversable(annotation: object) -> bool:
     core = unwrap_optional(annotation)
     if is_model(core):
@@ -960,10 +940,6 @@ def iter_schema_paths(
 
         if is_model(core):
             for name, field in core.model_fields.items():
-                if name == "audio_chunking" and is_chunkless_pipeline(core):
-                    continue
-                else:
-                    pass
                 child = prefix + (name,)
                 _emit(child)
                 walk(field.annotation, child, depth + 1)

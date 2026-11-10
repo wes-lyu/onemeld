@@ -62,23 +62,9 @@ def set_sampling_fields(values: dict) -> dict:
 
 
 async def police_media_reference(
-    source: str, kind: str, max_bytes: int | None, fetched: list[Path]
+    source: str, max_bytes: int | None, fetched: list[Path]
 ) -> str:
-    """Apply the server media policy to one chat media reference.
-
-    These are main's rules for chat media: data URLs pass, remote URLs follow
-    the domain allowlist on every redirect hop, file URLs need the allowed
-    local directory and must resolve inside it, and bare paths are confined to
-    that directory once it is set. Native SGLang applies no path policy and
-    matches exact hosts only, so with an allowlist the stage fetches remote
-    media itself into a temporary file, listed in fetched for the caller to
-    remove, and hands native that file. A refused URL is the caller's error,
-    and the shared error classifier decides other fetch failures, as it does
-    for every other model. Native's image and audio loaders open a resolved
-    local path as given, while its video loader parses a plain path as a URL
-    and misreads a name that holds #, ? or %, so a resolved local video goes
-    to native as a file URL, which it reads back exactly.
-    """
+    """Validate an image reference before sending it to native SGLang."""
     connector = get_global_resource_connector()
     url = urlparse(source)
     if url.scheme == "data":
@@ -119,30 +105,28 @@ async def police_media_reference(
         resolved = resolve_local_file(
             source, allowed_local_media_path=connector.allowed_local_media_path
         )
-    return resolved.as_uri() if kind == "video_url" else str(resolved)
+    return str(resolved)
 
 
 async def police_chat_media(
     messages: list[dict], max_bytes: int | None, fetched: list[Path]
 ) -> None:
-    """Police every image, video, and audio reference of the messages in place."""
+    """Validate and normalize each image reference in place."""
     for message in messages:
         content = message.get("content")
         for part in content if isinstance(content, list) else ():
             kind = part.get("type") if isinstance(part, dict) else None
-            if kind not in ("image_url", "video_url", "audio_url"):
+            if kind != "image_url":
                 continue
             else:
                 pass
             reference = part.get(kind)
             if isinstance(reference, dict) and isinstance(reference.get("url"), str):
                 reference["url"] = await police_media_reference(
-                    reference["url"], kind, max_bytes, fetched
+                    reference["url"], max_bytes, fetched
                 )
             elif isinstance(reference, str):
-                part[kind] = await police_media_reference(
-                    reference, kind, max_bytes, fetched
-                )
+                part[kind] = await police_media_reference(reference, max_bytes, fetched)
             else:
                 raise ValueError(f"{kind} needs a url")
 
@@ -156,59 +140,10 @@ def build_chat_fields(
     options for this stage.
     """
     inputs = payload.request.inputs
-    metadata = payload.request.metadata or {}
-    if any(key.startswith("video_") or key == "use_audio_in_video" for key in metadata):
-        raise ValueError("Use native chat content for media and its processing options")
-    else:
-        pass
     if isinstance(inputs, str):
         messages = [{"role": "user", "content": inputs}]
     elif isinstance(inputs, list) and all(isinstance(m, dict) for m in inputs):
         messages = deepcopy(inputs)
-    elif isinstance(inputs, dict) and isinstance(inputs.get("messages"), list):
-        messages = deepcopy(inputs["messages"])
-        if not all(isinstance(message, dict) for message in messages):
-            raise ValueError("Chat messages must be mappings")
-        else:
-            pass
-        media = {key: inputs.get(key) for key in ("images", "videos", "audios")}
-        if media["audios"]:
-            raise ValueError(
-                "Use native chat content for media and its processing options"
-            )
-        else:
-            pass
-        for key, kind in (("images", "image_url"), ("videos", "video_url")):
-            values = media[key]
-            if not values:
-                continue
-            else:
-                pass
-            if not isinstance(values, list) or not all(
-                isinstance(v, str) for v in values
-            ):
-                raise ValueError("Media inputs must be lists of URLs or data URLs")
-            else:
-                pass
-            message = next(
-                (m for m in reversed(messages) if m.get("role") == "user"), None
-            )
-            if message is None:
-                raise ValueError("Media requires a user message")
-            else:
-                pass
-            content = message.get("content") or []
-            if isinstance(content, str):
-                content = [{"type": "text", "text": content}]
-            else:
-                pass
-            if not isinstance(content, list):
-                raise ValueError("Media requires text or content parts")
-            else:
-                pass
-            message["content"] = content + [
-                {"type": kind, kind: {"url": v}} for v in values
-            ]
     else:
         raise ValueError("Chat inputs must be text or chat messages")
     if not messages:

@@ -7,7 +7,6 @@ from typing import Literal, TypeAlias, TypedDict
 
 import msgspec
 
-from sglang_omni.proto.admin import AdminOperation, AdminResult, SerializedAdminResult
 from sglang_omni.proto.kv_transfer import (
     KVTransferPrepareMessage,
     KVTransferReadyMessage,
@@ -419,40 +418,10 @@ class ProfilerStopMessage:
         return cls(run_id=d.get("run_id"))
 
 
-@dataclass
-class AdminMessage:
-    """Send an administrative operation to a stage."""
-
-    operation: AdminOperation
-
-    def to_dict(self) -> dict[str, str | dict[str, object]]:
-        return {"type": "admin", "operation": self.operation.to_dict()}
-
-    @classmethod
-    def from_dict(cls, d: Mapping[str, object]) -> "AdminMessage":
-        return cls(operation=AdminOperation.from_dict(d["operation"]))
-
-
-@dataclass
-class AdminResultMessage:
-    """Return an administrative result to the coordinator."""
-
-    result: AdminResult
-
-    def to_dict(self) -> dict[str, str | SerializedAdminResult]:
-        return {"type": "admin_result", "result": self.result.to_dict()}
-
-    @classmethod
-    def from_dict(cls, d: Mapping[str, object]) -> "AdminResultMessage":
-        return cls(result=AdminResult.from_dict(d["result"]))
-
-
 def parse_message(
     d: Mapping[str, object],
 ) -> (
-    AdminMessage
-    | AdminResultMessage
-    | DataAckMessage
+    DataAckMessage
     | DataReadyMessage
     | KVTransferPrepareMessage
     | KVTransferReadyMessage
@@ -491,10 +460,6 @@ def parse_message(
         return ProfilerStartMessage.from_dict(d)
     elif msg_type == "profiler_stop":
         return ProfilerStopMessage.from_dict(d)
-    elif msg_type == "admin":
-        return AdminMessage.from_dict(d)
-    elif msg_type == "admin_result":
-        return AdminResultMessage.from_dict(d)
     else:
         raise ValueError(f"Unknown message type: {msg_type}")
 

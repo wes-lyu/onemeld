@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import gc
-import inspect
 import logging
 import os
 import queue as _queue_mod
@@ -45,10 +44,6 @@ from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.profiler.event_recorder import get_recorder as _get_recorder
 from sglang_omni.profiler.event_recorder import set_active_stage as _set_active_stage
 from sglang_omni.proto import (
-    AdminMessage,
-    AdminOperation,
-    AdminResult,
-    AdminResultMessage,
     CompleteMessage,
     DataAckMessage,
     DataReadyMessage,
@@ -62,7 +57,6 @@ from sglang_omni.proto import (
     SubmitMessage,
 )
 from sglang_omni.proto.request import RoutedPayloads
-from sglang_omni.proto.session import SessionOperation, find_session_operation
 from sglang_omni.relay.base import Relay
 from sglang_omni.scheduling.message import (
     IncomingMessage,
@@ -72,7 +66,6 @@ from sglang_omni.scheduling.message import (
 )
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.scheduling.tensor_parallel_scheduler import TensorParallelScheduler
-from sglang_omni.serve.stage_routes import StageHttpServer, StageRoutesError
 
 TorchProfiler = current_platform.get_torch_profiler()
 
@@ -144,7 +137,6 @@ class Stage:
         is_terminal: bool = False,
         replica_topology: dict[str, list[str]] | None = None,
         allow_child_processes: bool = False,
-        http_socket_path: str | None = None,
         process_failure_callback: ProcessFailureCallback | None = None,
     ) -> None:
         self.process_failure_callback: ProcessFailureCallback | None = (
@@ -176,8 +168,6 @@ class Stage:
         self.is_terminal = is_terminal
         self.owns_external_io = role in {"single", "leader"}
         # Only the instance that owns external I/O serves the stage's routes.
-        self.http_socket_path = http_socket_path if self.owns_external_io else None
-        self.http_server: StageHttpServer | None = None
         self.replica_topology = ReplicaTopology.from_dict(replica_topology)
         self.replica_bindings: dict[str, dict[str, int]] = {}
 
@@ -342,28 +332,7 @@ class Stage:
                 pass
         else:
             pass
-        if self.http_socket_path is not None:
-            await self.start_http_routes(self.http_socket_path)
-        else:
-            pass
-
         logger.info("Stage %s started", self.name)
-
-    async def start_http_routes(self, socket_path: str) -> None:
-        """Serve the scheduler's HTTP app before the stage reports ready."""
-        app_factory = getattr(self.scheduler, "http_app", None)
-        if not callable(app_factory):
-            raise StageRoutesError(
-                f"Stage {self.name} declares http_routes, but its scheduler "
-                f"{type(self.scheduler).__name__} provides no http_app()"
-            )
-        else:
-            pass
-        app = await asyncio.to_thread(app_factory)
-        server = StageHttpServer(self.name, app, socket_path)
-        await asyncio.to_thread(server.start)
-        self.http_server = server
-        logger.info("Stage %s serves its HTTP routes", self.name)
 
     async def stop(self) -> None:
         self.running = False
@@ -383,18 +352,6 @@ class Stage:
             else:
                 pass
 
-        # The routes stop first, so no new request reaches a stopping scheduler.
-        http_server = self.http_server
-        self.http_server = None
-        if http_server is not None:
-            try:
-                await asyncio.to_thread(
-                    http_server.stop, _SCHEDULER_THREAD_JOIN_TIMEOUT_S
-                )
-            except Exception as exc:
-                _record_cleanup_error("HTTP routes", exc)
-        else:
-            pass
         receive_tasks = list(self.receive_tasks)
         for task in receive_tasks:
             task.cancel()
@@ -489,7 +446,6 @@ class Stage:
                             FreezeGCMessage,
                             ProfilerStartMessage,
                             ProfilerStopMessage,
-                            AdminMessage,
                         ),
                     )
                 ):
@@ -545,7 +501,6 @@ class Stage:
             | FreezeGCMessage
             | ProfilerStartMessage
             | ProfilerStopMessage
-            | AdminMessage
         ),
     ) -> None:
         if isinstance(msg, SubmitMessage):
@@ -560,8 +515,6 @@ class Stage:
             self.on_profiler_start(msg)
         elif isinstance(msg, ProfilerStopMessage):
             self.on_profiler_stop(msg)
-        elif isinstance(msg, AdminMessage):
-            await self.on_admin(msg)
         else:
             pass
 
@@ -1231,21 +1184,6 @@ class Stage:
                 pass
         else:
             pass
-        session_operation = find_session_operation(payload.request.metadata)
-        if session_operation is not None:
-            # Note (Junnan Li): A preempted append dies here as the control arrives: its result here and anything it sends here later are dropped.
-            for preempted_request_id in session_operation.preempted_request_ids:
-                self.on_abort(preempted_request_id)
-        else:
-            pass
-        if (
-            session_operation is not None
-            and session_operation.operation == "append"
-            and self.owns_external_io
-        ):
-            await self.forward_session_append(request_id, payload, session_operation)
-        else:
-            pass
         _emit_event(
             request_id=request_id,
             stage=self.name,
@@ -1265,159 +1203,6 @@ class Stage:
             enqueue(msg)
         else:
             self.scheduler.inbox.put(msg)
-
-    async def forward_session_append(
-        self,
-        request_id: str,
-        payload: StagePayload,
-        session_operation: SessionOperation,
-    ) -> None:
-        """A session unit's payload reaches an owner this stage streams to before the stream; the stream is this stage's whole output to it."""
-        owners = session_operation.stages
-        if self.name not in owners:
-            return
-        else:
-            index = owners.index(self.name)
-        if index + 1 < len(owners) and owners[index + 1] in self.stream_targets:
-            # Note (Junnan Li): Nothing of this request has streamed yet, so the payload cannot overtake a chunk and may go the local way.
-            await self.send_to_stage(
-                request_id,
-                owners[index + 1],
-                payload,
-                allow_local_object=True,
-                stream_targets_for_request=set(),
-            )
-        else:
-            pass
-
-    async def on_admin(self, msg: AdminMessage) -> None:
-        operation = msg.operation
-        if self.role == "leader" and self.tp_fanout is not None:
-            local = await self.run_admin_operation(operation)
-            try:
-                follower_msgs = await self.tp_fanout.collect_admin_results(
-                    operation.op_id,
-                    timeout_s=float(
-                        60.0 if operation.timeout_s is None else operation.timeout_s
-                    ),
-                )
-            except Exception as exc:
-                local.success = False
-                local.error = str(exc)
-                local.message = "failed to collect TP follower admin results"
-                follower_msgs = []
-
-            rank_results = [local] + [item.result for item in follower_msgs]
-            success = all(item.success for item in rank_results)
-            errors = [item.error for item in rank_results if item.error]
-            data = dict(local.data)
-            data["tp_size"] = len(rank_results)
-            data["rank_results"] = [item.to_dict() for item in rank_results]
-            result = AdminResult(
-                op_id=operation.op_id,
-                stage=self.name,
-                action=operation.action,
-                success=success,
-                message=(
-                    local.message if success else "; ".join(errors) or local.message
-                ),
-                data=data,
-                error=None if success else "; ".join(errors) or local.error,
-                rank=0,
-                role=self.role,
-            )
-            await self.control_plane.send_admin_result(AdminResultMessage(result))
-            return
-        else:
-            pass
-
-        result = await self.run_admin_operation(operation)
-        await self.control_plane.send_admin_result(AdminResultMessage(result))
-
-    async def run_admin_operation(self, operation: AdminOperation) -> AdminResult:
-        try:
-            handler = getattr(self.scheduler, "admin", None)
-            if handler is None:
-                return self.admin_result(
-                    operation,
-                    success=True,
-                    message="stage does not support admin operations",
-                    data={"skipped": True, "unsupported": True},
-                )
-            else:
-                pass
-            action = operation.action
-            payload = dict(operation.payload)
-            loop = asyncio.get_running_loop()
-            outcome = await loop.run_in_executor(None, lambda: handler(action, payload))
-            if inspect.isawaitable(outcome):
-                outcome = await outcome
-            else:
-                pass
-            return self.admin_result_from_outcome(operation, outcome)
-        except Exception as exc:
-            logger.exception(
-                "Stage %s admin operation failed: action=%s",
-                self.name,
-                getattr(operation, "action", None),
-            )
-            return self.admin_result(
-                operation,
-                success=False,
-                message=str(exc),
-                error=str(exc),
-            )
-
-    def admin_result_from_outcome(
-        self, operation: AdminOperation, outcome: object
-    ) -> AdminResult:
-        if isinstance(outcome, AdminResult):
-            return outcome
-        else:
-            pass
-        if isinstance(outcome, dict):
-            data = dict(outcome.get("data") or {})
-            for key, value in outcome.items():
-                if key not in {"success", "message", "data", "error"}:
-                    data.setdefault(key, value)
-                else:
-                    pass
-            return self.admin_result(
-                operation,
-                success=bool(outcome.get("success", True)),
-                message=str(outcome.get("message") or "ok"),
-                data=data,
-                error=outcome.get("error"),
-            )
-        else:
-            pass
-        return self.admin_result(
-            operation,
-            success=True,
-            message="ok",
-            data={"result": outcome},
-        )
-
-    def admin_result(
-        self,
-        operation: AdminOperation,
-        *,
-        success: bool,
-        message: str = "",
-        data: Mapping[str, object] | None = None,
-        error: str | None = None,
-    ) -> AdminResult:
-        return AdminResult(
-            op_id=operation.op_id,
-            stage=self.name,
-            action=operation.action,
-            success=success,
-            message=message,
-            data=dict(data or {}),
-            error=error,
-            rank=getattr(self.scheduler, "tp_rank", None),
-            role=self.role,
-        )
 
     # ------------------------------------------------------------------
     # Outbox drain: scheduler results → route downstream
@@ -1758,64 +1543,7 @@ class Stage:
             return
         else:
             pass
-        session_operation = (
-            find_session_operation(result.request.metadata)
-            if isinstance(result, StagePayload)
-            else None
-        )
-        if session_operation is not None and session_operation.operation != "append":
-            message = CompleteMessage(
-                request_id=request_id,
-                from_stage=self.name,
-                success=True,
-                result=result.data,
-            )
-            if on_submitted is None:
-                await self.control_plane.send_complete(message)
-            else:
-                await self.control_plane.send_complete(
-                    message, on_submitted=on_submitted
-                )
-                on_submitted()
-            self.clear_request_state(request_id)
-            return
-        else:
-            pass
         actual = self.get_next(request_id, result)
-        is_forwarded_at_admission = False
-        if session_operation is None:
-            pass
-        else:
-            owners = session_operation.stages
-            if self.name in owners:
-                index = owners.index(self.name)
-            else:
-                await self.send_failure(
-                    request_id, "session route must use fixed, linear payload edges"
-                )
-                return
-            if index + 1 < len(owners):
-                expected = self.logical_source(owners[index + 1])
-            else:
-                expected = None
-            if any(target != expected for target in self.stream_targets):
-                await self.send_failure(
-                    request_id, "session route must use fixed, linear payload edges"
-                )
-                return
-            else:
-                pass
-            if isinstance(actual, list) and len(actual) == 1:
-                actual_target = actual[0]
-            else:
-                actual_target = actual
-            if actual_target != expected:
-                await self.send_failure(
-                    request_id, "session route differs from the stage payload route"
-                )
-                return
-            else:
-                is_forwarded_at_admission = expected in self.stream_targets
         if on_submitted is not None:
             # Claim before any stream completion, so a refused result sends none.
             next_stages = actual
@@ -1847,11 +1575,6 @@ class Stage:
                 is_done=True,
             )
 
-        if is_forwarded_at_admission:
-            self.clear_request_state(request_id)
-            return
-        else:
-            pass
         next_stages = actual
         routes_to_self = False
         keeps_state = False

@@ -5,17 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING
 
 from fastapi.responses import StreamingResponse
 from starlette.responses import AsyncContentStream
 from starlette.types import Receive, Scope, Send
-
-if TYPE_CHECKING:
-    from sglang_omni.client.types import GenerateChunk
-else:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +36,7 @@ class ClosableStreamingResponse(StreamingResponse):
 
 
 async def close_async_iterator_if_supported(
-    stream: AsyncContentStream | AsyncIterator[GenerateChunk],
+    stream: AsyncContentStream,
 ) -> None:
     try:
         close = stream.aclose

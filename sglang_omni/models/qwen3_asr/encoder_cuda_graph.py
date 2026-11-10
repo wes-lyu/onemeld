@@ -39,7 +39,7 @@ def build_buckets(max_batch: int, max_tokens_per_clip: int) -> tuple[int, ...]:
     1. max_batch: pre_lm_max_batch_size on the per-LM encoder service
       (maximum clips in one encode batch).
     2. max_tokens_per_clip: encoder output tokens for the longest clip the
-      pipeline admits; derived from AudioChunkingConfig.max_audio_clip_s
+      pipeline admits; derived from the stage clip length
       via qwen3_asr_num_audio_tokens.
 
     Buckets are power-of-two sizes from 128 up to max_batch * max_tokens_per_clip.

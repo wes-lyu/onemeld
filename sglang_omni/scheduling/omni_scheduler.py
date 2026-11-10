@@ -21,7 +21,7 @@ import time
 import types
 from array import array
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass
@@ -41,7 +41,6 @@ from sglang.srt.managers.schedule_batch import (
     NextBatchPlan,
     Req,
     ScheduleBatch,
-    retract_all,
 )
 from sglang.srt.managers.scheduler import (
     TEST_RETRACT,
@@ -55,7 +54,7 @@ from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool, ReqToTokenPool
-from sglang.srt.runtime_context import get_model, get_parallel, get_serving, get_spec
+from sglang.srt.runtime_context import get_serving, get_spec
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.session.session_controller import SessionController
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
@@ -63,17 +62,10 @@ from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import DynamicGradMode, broadcast_pyobj
 from typing_extensions import TypedDict
 
-from sglang_omni.admission import (
-    AdminDroppedRequestError,
-    ContextExhaustedError,
-    QueueFullError,
-)
+from sglang_omni.admission import QueueFullError
 from sglang_omni.model_runner.base import ModelRunner, PendingStep
 from sglang_omni.model_runner.model_worker import ModelWorker
-from sglang_omni.model_runner.weight_checker import WeightCheckResult
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
-from sglang_omni.platforms import current_platform
-from sglang_omni.profiler.duplex_events import emit_session_stage_bypassed
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.profiler.event_recorder import (
     emit_model_path_end as _emit_model_path_end,
@@ -82,29 +74,11 @@ from sglang_omni.profiler.event_recorder import (
     emit_model_path_start as _emit_model_path_start,
 )
 from sglang_omni.profiler.event_recorder import get_active_stage as _get_active_stage
-from sglang_omni.proto.admin import (
-    ADMIN_CONTINUE_GENERATION,
-    ADMIN_DESTROY_WEIGHTS_UPDATE_GROUP,
-    ADMIN_INIT_WEIGHTS_UPDATE_GROUP,
-    ADMIN_MODEL_INFO,
-    ADMIN_PAUSE_GENERATION,
-    ADMIN_UPDATE_WEIGHTS_FROM_DISK,
-    ADMIN_UPDATE_WEIGHTS_FROM_DISTRIBUTED,
-    ADMIN_UPDATE_WEIGHTS_FROM_TENSOR,
-    ADMIN_WEIGHTS_CHECKER,
-)
 from sglang_omni.proto.request import StagePayload
-from sglang_omni.proto.session import find_session_operation
 from sglang_omni.scheduling.message import (
     IncomingMessage,
     OutgoingMessage,
     put_messages,
-)
-from sglang_omni.scheduling.sglang_backend.ar_session import (
-    ARSessionAdapter,
-    ARSessionBridge,
-    SessionUnit,
-    is_close_request,
 )
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
 from sglang_omni.scheduling.types import (
@@ -119,16 +93,6 @@ from sglang_omni.scheduling.types import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class RequiredAdminActionResult(TypedDict):
-    success: bool
-    message: str
-
-
-class AdminActionResult(RequiredAdminActionResult, total=False):
-    data: dict[str, object] | WeightCheckResult
-    error: str | None
 
 
 _FAILED_BATCH_RESULT = object()
@@ -268,7 +232,6 @@ class OmniSchedulerArguments(TypedDict, Generic[RequestDataT], total=False):
     request_builder: (
         Callable[[StagePayload], RequestDataT | DeferredAdmission[RequestDataT]] | None
     )
-    session_adapter: ARSessionAdapter | None
     result_adapter: Callable[[RequestDataT], StagePayload] | None
     stream_output_builder: StreamOutputBuilder[RequestDataT] | None
     stream_chunk_handler: (
@@ -308,9 +271,7 @@ class OmniScheduler(Generic[RequestDataT]):
         are defined directly on this class and take precedence.
     """
 
-    session_bridge: ARSessionBridge | None = None
     scheduler_thread_id: int | None = None
-    previous_pending_decode: PendingDecode | None = None
     async_decode_resolve_before_prefill: bool = False
     draft_worker: BaseSpecWorker | None = None
     async_prefill: bool = False
@@ -329,7 +290,6 @@ class OmniScheduler(Generic[RequestDataT]):
             Callable[[StagePayload], RequestDataT | DeferredAdmission[RequestDataT]]
             | None
         ) = None,
-        session_adapter: ARSessionAdapter | None = None,
         result_adapter: Callable[[RequestDataT], StagePayload] | None = None,
         stream_output_builder: StreamOutputBuilder[RequestDataT] | None = None,
         stream_chunk_handler: (
@@ -360,12 +320,6 @@ class OmniScheduler(Generic[RequestDataT]):
         self.requires_tp_work_fanout: bool = False
 
         # --- Request builder: StagePayload → SGLangARRequestData ----------
-        self.session_adapter = session_adapter
-        self.session_bridge: ARSessionBridge | None = None
-        if session_adapter is not None and not server_args.enable_streaming_session:
-            raise ValueError("session_adapter requires enable_streaming_session")
-        else:
-            pass
         self.request_builder = request_builder
         self.result_adapter = result_adapter
         self.model_runner: ModelRunner[RequestDataT] | None = None
@@ -543,7 +497,6 @@ class OmniScheduler(Generic[RequestDataT]):
         # decode batch, or None. Tracked here (not just a loop local) so abort
         # can reach the in-flight step. See _event_loop_async_decode.
         self.async_pending: PendingDecode | None = None
-        self.previous_pending_decode = None
         self.forward_ct = 0
         self.return_health_check_ct = 0
         self.num_retracted_reqs = 0
@@ -551,12 +504,7 @@ class OmniScheduler(Generic[RequestDataT]):
         self.sessions: dict = {}
         self.forward_sleep_time = None
         self._engine_paused = False  # noqa: leading-underscore
-        self.admin_lock = threading.Lock()
-        self.admin_queue = _queue_mod.Queue()
-        self.tp_admin_waiters: deque[_queue_mod.Queue[AdminActionResult]] = deque()
-        self.tp_admin_results: deque[AdminActionResult] = deque()
         self.scheduler_thread_id: int | None = None
-        self.last_pause_mode: str | None = None
 
         # Chunked prefill
         self.chunked_prefill_size = get_schedule().chunked_prefill_size
@@ -624,8 +572,6 @@ class OmniScheduler(Generic[RequestDataT]):
         self.draft_worker = tp_worker.speculative_worker
         if self.draft_worker is None:
             self.spec_algorithm = SpeculativeAlgorithm.NONE
-        elif session_adapter is not None:
-            raise ValueError("speculative decoding does not support sessions")
         elif server_args.enable_mixed_chunk:
             raise ValueError(
                 "speculative decoding verifies whole blocks; disable enable_mixed_chunk"
@@ -794,10 +740,6 @@ class OmniScheduler(Generic[RequestDataT]):
         from types import SimpleNamespace
 
         self.session_controller = SessionController(self.tree_cache)
-        if self.session_adapter is not None:
-            self.session_bridge = ARSessionBridge(self, self.session_adapter)
-        else:
-            pass
         self.dllm_manager = SimpleNamespace(any_staging_reqs=lambda: False)
         self.load_snapshot_writer = None
         self.kv_events_publisher = SimpleNamespace(
@@ -1069,18 +1011,9 @@ class OmniScheduler(Generic[RequestDataT]):
             if msg.type == "abort":
                 self.abort(msg.request_id)
                 continue
-            elif msg.type == "admin":
-                self.tp_admin_results.append(self.run_admin_action_safely(*msg.data))
-                self.answer_tp_admin_waiters()
-                continue
             else:
                 pass
-            is_cleanup = (
-                self.session_bridge is not None
-                and msg.type == "new_request"
-                and is_close_request(msg.data)
-            )
-            if msg.request_id in self.aborted_request_ids and not is_cleanup:
+            if msg.request_id in self.aborted_request_ids:
                 continue
             else:
                 pass
@@ -1125,110 +1058,9 @@ class OmniScheduler(Generic[RequestDataT]):
                 break
         return recv_msgs
 
-    def active_session_unit(self, request_id: str) -> SessionUnit | None:
-        bridge = self.session_bridge
-        if bridge is None:
-            return None
-        else:
-            return bridge.units_by_request_id.get(request_id)
-
-    def route_session_input(self, payload: StagePayload) -> bool:
-        """Return whether the payload should be built and enqueued."""
-        operation = find_session_operation(payload.request.metadata)
-        bridge = self.session_bridge
-        if operation is None:
-            return True
-        elif bridge is None:
-            raise ValueError("AR streaming sessions are not enabled for this stage")
-        elif operation.operation != "append":
-            for session_payload in bridge.apply_operation(payload, operation):
-                if session_payload.request_id in self.aborted_request_ids:
-                    pass
-                else:
-                    self.outbox.put(
-                        OutgoingMessage(
-                            request_id=session_payload.request_id,
-                            type="result",
-                            data=session_payload,
-                        )
-                    )
-            return False
-        else:
-            unit = bridge.accept(payload, operation)
-            chunk = unit.chunk
-            try:
-                bypass_generation = bridge.prepare_unit(unit, payload)
-            except Exception:
-                bridge.complete(payload.request_id)
-                raise
-            is_empty_eos = (
-                chunk.eos
-                and chunk.duration_ms == 0
-                and isinstance(chunk.payload, bytes)
-                and not chunk.payload
-            )
-            if bypass_generation:
-                emit_session_stage_bypassed(
-                    request_id=payload.request_id,
-                    session_identity=unit.session_identity,
-                    input_chunk=unit.chunk,
-                    reason="generation_bypassed",
-                    stage=_get_active_stage(),
-                )
-                bridge.complete(payload.request_id)
-                self.outbox.put(
-                    OutgoingMessage(
-                        request_id=payload.request_id,
-                        type="result",
-                        data=payload,
-                    )
-                )
-                return False
-            elif not is_empty_eos:
-                return True
-            else:
-                try:
-                    eos_payload = bridge.adapter.finish_input(
-                        unit.session_identity, payload
-                    )
-                except Exception:
-                    bridge.complete(payload.request_id)
-                    raise
-                if eos_payload is None:
-                    return True
-                else:
-                    emit_session_stage_bypassed(
-                        request_id=payload.request_id,
-                        session_identity=unit.session_identity,
-                        input_chunk=unit.chunk,
-                        reason="finish_input",
-                        stage=_get_active_stage(),
-                    )
-                    bridge.complete(payload.request_id)
-                    self.outbox.put(
-                        OutgoingMessage(
-                            request_id=payload.request_id,
-                            type="result",
-                            data=eos_payload,
-                        )
-                    )
-                    return False
-
     def process_input_requests(self, recv_reqs: list[StagePayload]) -> None:
         """Convert incoming payloads to SGLang Reqs and enqueue."""
-        ordinary_payloads: list[StagePayload] = []
         submitted_build = False
-        for payload in recv_reqs:
-            try:
-                should_schedule = self.route_session_input(payload)
-            except (ValueError, QueueFullError) as exc:
-                self.emit_request_error(payload.request_id, exc)
-            else:
-                if should_schedule:
-                    ordinary_payloads.append(payload)
-                else:
-                    pass
-        recv_reqs = ordinary_payloads
         self.drain_request_admission_results()
         self.drain_request_build_results()
         recv_reqs, rejected = self.stage_request_build_payloads(recv_reqs)
@@ -1268,7 +1100,6 @@ class OmniScheduler(Generic[RequestDataT]):
                 payload.prefetched_chunks = buffered_chunks
             pending_stream_done = ingress.done if ingress is not None else False
             payload.prefetched_stream_done = pending_stream_done
-            session_unit = self.active_session_unit(req_id)
             if not self.is_request_build_ready(
                 payload,
                 pending_stream_done=pending_stream_done,
@@ -1277,24 +1108,8 @@ class OmniScheduler(Generic[RequestDataT]):
                 continue
             else:
                 pass
-            result = self.complete_without_generation(payload, session_unit)
-            if result is not None:
-                self.pending_stream_ingress.pop(req_id, None)
-                if session_unit is not None:
-                    self.session_bridge.complete(req_id)
-                else:
-                    pass
-                self.outbox.put(
-                    OutgoingMessage(request_id=req_id, type="result", data=result)
-                )
-                continue
-            else:
-                pass
             active_stage = _get_active_stage()
-            if session_unit is None:
-                request_build_executor = self.request_build_executor
-            else:
-                request_build_executor = None
+            request_build_executor = self.request_build_executor
             if request_build_executor is not None:
                 with self.request_admission_lock:
                     if (
@@ -1369,15 +1184,7 @@ class OmniScheduler(Generic[RequestDataT]):
             stage=active_stage,
             event_name="scheduler_request_build_start",
         )
-        session_unit = self.active_session_unit(req_id)
-        if session_unit is None:
-            req_data = self.request_builder(payload)
-        else:
-            bridge = self.session_bridge
-            assert bridge is not None
-            req_data = bridge.adapter.build(
-                session_unit.session_identity, session_unit.chunk, payload
-            )
+        req_data = self.request_builder(payload)
         _emit_event(
             request_id=req_id,
             stage=active_stage,
@@ -1670,27 +1477,9 @@ class OmniScheduler(Generic[RequestDataT]):
     ) -> None:
         req_id = payload.request_id
         self.deferred_request_payloads.pop(req_id, None)
-        session_unit = self.active_session_unit(req_id)
-        if session_unit is not None:
-            bridge = self.session_bridge
-            assert bridge is not None
-            try:
-                bridge.create_session_request(payload, req_data)
-            except ValueError as exc:
-                bridge.release_append_unit(req_id)
-                self.abort(req_id)
-                self.emit_request_error(req_id, exc)
-                return
-            except Exception:
-                bridge.release_append_unit(req_id)
-                self.abort(req_id)
-                raise
-        else:
-            pass
         req = req_data.req
         self.normalize_req_token_arrays(req)
         req_id = req.rid
-        # Session appends are checked after history restore, as SGLang does.
         if not req.origin_input_ids:
             self.emit_request_error(
                 req_id,
@@ -1706,31 +1495,7 @@ class OmniScheduler(Generic[RequestDataT]):
         if req_data.enforce_request_limits:
             error_msg = self.prepare_request_limits(req_data)
             if error_msg:
-                if session_unit is not None:
-                    error = ContextExhaustedError(
-                        f"{ContextExhaustedError.CODE}: the session reached the "
-                        f"thinker context length of {self.model_config.context_len} "
-                        f"tokens (the next unit needs {len(req.origin_input_ids)} "
-                        f"tokens, limit {self.max_req_input_len}). "
-                        "Start a new session."
-                    )
-                else:
-                    error = ValueError(error_msg)
-                self.emit_request_error(req_id, error)
-                self.abort(req_id)
-                return
-            else:
-                pass
-        else:
-            pass
-        session_unit = self.active_session_unit(req_id)
-        if session_unit is not None:
-            bridge = self.session_bridge
-            assert bridge is not None
-            capacity_message = bridge.check_session_capacity(req_id)
-            if capacity_message is not None:
-                self.emit_request_error(req_id, ValueError(capacity_message))
-                bridge.release_append_unit(req_id)
+                self.emit_request_error(req_id, ValueError(error_msg))
                 self.abort(req_id)
                 return
             else:
@@ -1794,11 +1559,6 @@ class OmniScheduler(Generic[RequestDataT]):
             req._omni_terminal_claimed = False  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
             req.omni_data = req_data  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
             self.waiting_queue.append(req)
-            enqueued_unit = self.active_session_unit(req_id)
-            if enqueued_unit is not None:
-                enqueued_unit.is_enqueued = True
-            else:
-                pass
 
         if request_admission_lock_held:
             enqueue_if_live()
@@ -1814,12 +1574,6 @@ class OmniScheduler(Generic[RequestDataT]):
             req.extra_key = f"{cache_key}:weights:{self.prompt_cache_epoch}"
         else:
             pass
-
-    def advance_prompt_cache_epoch(self) -> None:
-        with self.request_admission_lock:
-            self.prompt_cache_epoch += 1
-            for req in self.waiting_queue:
-                self.apply_prompt_cache_epoch(req)
 
     @staticmethod
     def normalize_req_token_arrays(req: Req) -> None:
@@ -1876,12 +1630,6 @@ class OmniScheduler(Generic[RequestDataT]):
     ) -> bool:
         del request_id, chunk
         return True
-
-    def complete_without_generation(
-        self, payload: StagePayload, session_unit: SessionUnit | None
-    ) -> StagePayload | None:
-        """The result of a build-ready request its model cannot generate for, or None to build it."""
-        return None
 
     def is_request_build_ready(
         self,
@@ -2020,29 +1768,6 @@ class OmniScheduler(Generic[RequestDataT]):
         plan = _Upstream.get_next_batch_to_run(self, running_batch, self.last_batch)
         self.running_batch = plan.running_batch
         return plan.batch_to_run
-
-    def get_num_allocatable_reqs(
-        self,
-        running_bs: int,
-        beam_width: int | None = None,
-        running_batch: ScheduleBatch | None = None,
-    ) -> int:
-        free_request_rows = _Upstream.get_num_allocatable_reqs(
-            self, running_bs, beam_width=beam_width, running_batch=running_batch
-        )
-        bridge = self.session_bridge
-        if bridge is None or beam_width is not None:
-            return free_request_rows
-        else:
-            # note (Junnan Li): A unit whose session slot holds a request row reuses that row, so it does not count against the free rows.
-            per_batch_limit = get_parallel().pp_max_micro_batch_size - running_bs
-            return min(
-                per_batch_limit,
-                free_request_rows
-                + bridge.count_row_reusing_requests(
-                    self.waiting_queue, free_request_rows
-                ),
-            )
 
     def is_prefill_expected(self) -> bool:
         running_batch = self.running_batch
@@ -2311,8 +2036,7 @@ class OmniScheduler(Generic[RequestDataT]):
         overrun) — emitting their extra chunk would corrupt the downstream
         vocoder's delayed-code stream. Aborted requests are suppressed for the
         same reason: an abort landing mid-step must not ship one more chunk."""
-        bridge = self.session_bridge
-        if self.stream_output_builder is None and bridge is None:
+        if self.stream_output_builder is None:
             return
         else:
             pass
@@ -2324,20 +2048,8 @@ class OmniScheduler(Generic[RequestDataT]):
             else:
                 pass
             req_output = mr_output.outputs[rid]
-            session_unit = self.active_session_unit(rid)
             try:
-                if (
-                    session_unit is not None
-                    and _get_active_stage() == session_unit.stages[-1]
-                ):
-                    assert bridge is not None
-                    messages = bridge.stream_messages(rid, sched_req.data, req_output)
-                elif self.stream_output_builder is not None:
-                    messages = self.stream_output_builder(
-                        rid, sched_req.data, req_output
-                    )
-                else:
-                    continue
+                messages = self.stream_output_builder(rid, sched_req.data, req_output)
                 messages = list(messages)
             except Exception as error:
                 logger.exception(
@@ -2376,15 +2088,7 @@ class OmniScheduler(Generic[RequestDataT]):
         put_messages(self.outbox, staged)
 
     def flush_stream_output(self, request_id: str, req_data: ARRequestData) -> None:
-        session_unit = self.active_session_unit(request_id)
-        if session_unit is not None and _get_active_stage() == session_unit.stages[-1]:
-            bridge = self.session_bridge
-            assert bridge is not None
-            self.put_stream_messages(
-                request_id,
-                bridge.stream_messages(request_id, req_data, should_flush=True),
-            )
-        elif self.stream_output_builder is None:
+        if self.stream_output_builder is None:
             return
         else:
             flush = getattr(self.stream_output_builder, "flush", None)
@@ -2450,7 +2154,7 @@ class OmniScheduler(Generic[RequestDataT]):
         for req in reqs:
             req.skip_radix_cache_insert = True
             req._omni_terminal_claimed = True  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
-            # note (Richard Wang): session cancel needs this, and abort skips it once claimed
+            # note (Richard Wang): abort skips a request once its terminal output is claimed
             if req.to_finish is None and not req.finished():
                 req.to_finish = FINISH_ABORT()
             else:
@@ -2651,13 +2355,7 @@ class OmniScheduler(Generic[RequestDataT]):
                 )
                 data.weight_version = get_serving().weight_version
                 self.flush_stream_output(rid, data)
-                session_unit = self.active_session_unit(rid)
-                if session_unit is None:
-                    result = self.result_adapter(data)
-                else:
-                    bridge = self.session_bridge
-                    assert bridge is not None
-                    result = bridge.adapter.result(session_unit.session_identity, data)
+                result = self.result_adapter(data)
             except Exception as exc:
                 terminal_error = exc
                 logger.exception(
@@ -2809,39 +2507,21 @@ class OmniScheduler(Generic[RequestDataT]):
                     self.event_loop_normal()
             model_path_status = "aborted"
         finally:
+            self.emit_remaining_model_path_ends(status=model_path_status)
+            self.scheduler_thread_id = None
             try:
-                if self.session_bridge is not None:
-                    self.resolve_pending_async()
-                    self.session_bridge.close_open_sessions()
-                else:
-                    pass
+                self.shutdown_request_build_executor()
             finally:
-                self.emit_remaining_model_path_ends(status=model_path_status)
-                self.scheduler_thread_id = None
-                try:
-                    self.shutdown_request_build_executor()
-                finally:
-                    self.discard_pending_request_admissions()
-                    self.shutdown_resources()
+                self.discard_pending_request_admissions()
+                self.shutdown_resources()
 
     def event_loop(self) -> None:
         self.start()
 
     def stop(self) -> None:
         self.running = False
-        retains_scheduler_thread = (
-            self.session_bridge is not None and self.scheduler_thread_id is not None
-        )
-        if retains_scheduler_thread:
-            # note (Junnan Li): Cleanup runs on the scheduler thread after it drains GPU work.
-            return
-        else:
-            if self.session_bridge is not None:
-                self.session_bridge.close_open_sessions()
-            else:
-                pass
-            self.discard_pending_request_admissions()
-            self.shutdown_resources()
+        self.discard_pending_request_admissions()
+        self.shutdown_resources()
 
     def discard_pending_request_admissions(self) -> None:
         with self.request_admission_lock:
@@ -2866,11 +2546,10 @@ class OmniScheduler(Generic[RequestDataT]):
         self.request_build_executor = None
 
     def abort(self, request_id: str, *, defer_running_cleanup: bool = True) -> None:
-        bridge = self.session_bridge
         if (
             self.scheduler_thread_id is not None
             and self.scheduler_thread_id != threading.get_ident()
-            and (bridge is not None or self.tp_size > 1)
+            and self.tp_size > 1
         ):
             # note (Richard Wang): every TP rank must drop a request in the same
             # pass, so the entry rank broadcast carries it and followers skip theirs.
@@ -2879,17 +2558,6 @@ class OmniScheduler(Generic[RequestDataT]):
             else:
                 pass
             return
-        else:
-            pass
-        if bridge is not None:
-            if (
-                request_id != bridge.cancelling_request_id
-                and self.active_session_unit(request_id) is not None
-            ):
-                bridge.cancel(request_id)
-                return
-            else:
-                pass
         else:
             pass
         with self.request_admission_lock:
@@ -2912,13 +2580,9 @@ class OmniScheduler(Generic[RequestDataT]):
                 if defer_running_cleanup
                 else False
             )
-            # note (Junnan Li): Cancelled units must hand retained rows and KV back to their session.
-            should_keep_session_rows = (
-                bridge is not None and bridge.cancelling_request_id == request_id
-            )
             immediate_reqs = (
                 []
-                if running_abort or should_keep_session_rows
+                if running_abort
                 else self.mark_request_finished_immediately(request_id)
             )
             pending = self.pending_request_builds.pop(request_id, None)
@@ -2968,485 +2632,6 @@ class OmniScheduler(Generic[RequestDataT]):
             pass
         self.drain_inbox_for_request(request_id)
 
-    def admin(
-        self, action: str, payload: dict[str, object] | None = None
-    ) -> AdminActionResult:
-        payload = dict(payload or {})
-        if self.should_enqueue_admin():
-            return self.enqueue_admin(action, payload)
-        else:
-            pass
-        return self.run_admin_action(action, payload)
-
-    def should_enqueue_admin(self) -> bool:
-        scheduler_thread_id = self.scheduler_thread_id
-        return (
-            self.running
-            and scheduler_thread_id is not None
-            and threading.get_ident() != scheduler_thread_id
-        )
-
-    def enqueue_admin(
-        self, action: str, payload: Mapping[str, object]
-    ) -> AdminActionResult:
-        timeout_s = float(payload.get("_admin_timeout_s", 300.0))
-        queued_payload = dict(payload)
-        queued_payload.pop("_admin_timeout_s", None)
-        response_queue: _queue_mod.Queue[AdminActionResult] = _queue_mod.Queue(
-            maxsize=1
-        )
-        self.admin_queue.put((action, queued_payload, response_queue))
-        try:
-            return response_queue.get(timeout=timeout_s)
-        except _queue_mod.Empty:
-            return {
-                "success": False,
-                "message": f"admin operation timed out after {timeout_s:.1f}s",
-                "error": "admin operation timed out",
-            }
-
-    def process_admin_requests(self) -> int:
-        processed = 0
-        while True:
-            try:
-                action, payload, response_queue = self.admin_queue.get_nowait()
-            except _queue_mod.Empty:
-                break
-            if self.tp_size > 1:
-                # note (Richard Wang): every TP rank must apply an admin action in
-                # the same pass, or one rank waits on a step the other never runs.
-                # The entry rank broadcast carries it, and each rank answers its
-                # own caller in order once applied.
-                self.tp_admin_waiters.append(response_queue)
-                if self.is_entry_rank:
-                    self.inbox.put(
-                        IncomingMessage(
-                            request_id="", type="admin", data=(action, payload)
-                        )
-                    )
-                else:
-                    pass
-                self.answer_tp_admin_waiters()
-            else:
-                response_queue.put(self.run_admin_action_safely(action, payload))
-            processed += 1
-        return processed
-
-    def run_admin_action_safely(
-        self, action: str, payload: dict[str, object]
-    ) -> AdminActionResult:
-        try:
-            return self.run_admin_action(action, payload)
-        except Exception as exc:
-            logger.exception("OmniScheduler admin operation failed: %s", action)
-            return {
-                "success": False,
-                "message": str(exc),
-                "error": str(exc),
-            }
-
-    def answer_tp_admin_waiters(self) -> None:
-        while self.tp_admin_waiters and self.tp_admin_results:
-            self.tp_admin_waiters.popleft().put(self.tp_admin_results.popleft())
-
-    def run_admin_action(
-        self, action: str, payload: dict[str, object] | None = None
-    ) -> AdminActionResult:
-        payload = dict(payload or {})
-        if action == ADMIN_MODEL_INFO:
-            return self.admin_model_info()
-        else:
-            pass
-        if action == ADMIN_PAUSE_GENERATION:
-            return self.admin_pause_generation(payload)
-        else:
-            pass
-        if action == ADMIN_CONTINUE_GENERATION:
-            return self.admin_continue_generation(payload)
-        else:
-            pass
-        if action == ADMIN_UPDATE_WEIGHTS_FROM_DISK:
-            return self.admin_update_weights_from_disk(payload)
-        else:
-            pass
-        if action == ADMIN_UPDATE_WEIGHTS_FROM_TENSOR:
-            return self.admin_update_weights_from_tensor(payload)
-        else:
-            pass
-        if action == ADMIN_UPDATE_WEIGHTS_FROM_DISTRIBUTED:
-            return self.admin_update_weights_from_distributed(payload)
-        else:
-            pass
-        if action == ADMIN_INIT_WEIGHTS_UPDATE_GROUP:
-            return self.admin_init_weights_update_group(payload)
-        else:
-            pass
-        if action == ADMIN_DESTROY_WEIGHTS_UPDATE_GROUP:
-            return self.admin_destroy_weights_update_group(payload)
-        else:
-            pass
-        if action == ADMIN_WEIGHTS_CHECKER:
-            return self.admin_weights_checker(payload)
-        else:
-            pass
-        return {
-            "success": True,
-            "message": f"unsupported admin action: {action}",
-            "data": {"skipped": True, "unsupported": True},
-        }
-
-    def admin_model_info(self) -> AdminActionResult:
-        info = self.model_worker.model_info()
-        if self.model_runner is not None:
-            info.update(self.model_runner.model_info())
-        else:
-            pass
-        with self.request_admission_lock:
-            request_build_pending = len(self.pending_request_builds)
-            request_admission_pending = len(self.pending_request_admissions)
-            request_build_backlog = len(self.backlogged_request_build_payloads)
-            waiting_queue_size = len(self.waiting_queue)
-        info.update(
-            {
-                "stage_tp_rank": self.tp_rank,
-                "stage_tp_size": self.tp_size,
-                "engine_paused": self._engine_paused,  # noqa: leading-underscore
-                "waiting_queue_size": waiting_queue_size,
-                "request_build_workers": self.request_build_max_workers,
-                "request_build_pending": request_build_pending,
-                "request_admission_pending": request_admission_pending,
-                "request_build_max_pending": self.request_build_max_pending,
-                "request_build_backlog": request_build_backlog,
-                "request_build_max_pending_observed": (
-                    self.request_build_max_pending_observed
-                ),
-                "running_batch_size": len(self.running_batch.reqs),
-                "model_path": get_model().model_path,
-                "load_format": get_model().load_format,
-                "weight_version": get_serving().weight_version,
-            }
-        )
-        return {"success": True, "message": "ok", "data": info}
-
-    def admin_pause_generation(self, payload: dict[str, object]) -> AdminActionResult:
-        mode = str(payload.get("mode") or "abort")
-        if mode not in {"abort", "retract", "in_place"}:
-            return {
-                "success": False,
-                "message": f"invalid pause mode: {mode}",
-                "error": f"invalid pause mode: {mode}",
-            }
-        else:
-            pass
-
-        with self.admin_lock:
-            self._engine_paused = True  # noqa: leading-underscore
-            self.last_pause_mode = mode
-            self.resolve_pending_async()
-            num_paused = 0
-            if mode == "abort":
-                num_paused = len(self.abort_all_requests())
-            elif mode == "retract":
-                num_paused = self.retract_running_requests()
-            else:
-                pass
-        return {
-            "success": True,
-            "message": "generation paused",
-            "data": {
-                "mode": mode,
-                "num_paused_requests": num_paused,
-                "engine_paused": self._engine_paused,  # noqa: leading-underscore
-            },
-        }
-
-    def admin_continue_generation(
-        self, payload: dict[str, object]
-    ) -> AdminActionResult:
-        with self.admin_lock:
-            if bool(payload.get("torch_empty_cache", True)):
-                self.empty_torch_cache()
-            else:
-                pass
-            self._engine_paused = False  # noqa: leading-underscore
-            self.last_pause_mode = None
-        return {
-            "success": True,
-            "message": "generation continued",
-            "data": {"engine_paused": self._engine_paused},  # noqa: leading-underscore
-        }
-
-    def admin_update_weights_from_disk(
-        self, payload: dict[str, object]
-    ) -> AdminActionResult:
-        return self.run_weight_update_with_lifecycle(
-            payload,
-            self.model_worker.update_weights_from_disk,
-            {
-                "model_path": payload.get("model_path"),
-                "weight_version": payload.get("weight_version"),
-                "token_step": payload.get("token_step"),
-            },
-        )
-
-    def run_weight_update_with_lifecycle(
-        self,
-        payload: dict[str, object],
-        update_fn,
-        result_data: Mapping[str, object],
-        *,
-        keep_pause_on_failure: bool = False,
-    ) -> AdminActionResult:
-        bridge = self.session_bridge
-        if bridge is not None and bridge.sessions:
-            return {
-                "success": False,
-                "message": "close retained sessions before updating weights",
-            }
-        elif self.draft_worker is not None:
-            return {
-                "success": False,
-                "message": "weight updates would leave the speculative draft stale",
-            }
-        else:
-            pass
-        keep_pause = bool(payload.get("keep_pause", False))
-        keep_engine_paused = keep_pause
-        with self.admin_lock:
-            previous_pause_state = self._engine_paused  # noqa: leading-underscore
-            self._engine_paused = True  # noqa: leading-underscore
-            try:
-                self.resolve_pending_async()
-                num_paused = 0
-                abort_all_requests = bool(payload.get("abort_all_requests", False))
-                if abort_all_requests:
-                    num_paused = len(self.abort_all_requests())
-                else:
-                    active_request_ids = self.active_request_ids()
-                    if active_request_ids and not self.can_update_active_requests(
-                        previous_pause_state
-                    ):
-                        if not keep_pause:
-                            self._engine_paused = (
-                                previous_pause_state  # noqa: leading-underscore
-                            )
-                        else:
-                            pass
-                        return {
-                            "success": False,
-                            "message": (
-                                "active requests are present; set "
-                                "abort_all_requests=true or pause_generation with "
-                                "mode=retract before updating weights"
-                            ),
-                            "error": "active requests present during weight update",
-                            "data": {
-                                "active_request_count": len(active_request_ids),
-                                "active_request_ids": active_request_ids[:16],
-                                "abort_all_requests": abort_all_requests,
-                                "pause_mode": self.last_pause_mode,
-                                "engine_paused": self._engine_paused,  # noqa: leading-underscore
-                            },
-                        }
-                    else:
-                        pass
-
-                try:
-                    success, message = update_fn(payload)
-                except Exception:
-                    if keep_pause_on_failure:
-                        keep_engine_paused = True
-                    else:
-                        pass
-                    raise
-                if success:
-                    self.advance_prompt_cache_epoch()
-                else:
-                    pass
-                flush_success: bool | None = None
-                if success and bool(payload.get("flush_cache", True)):
-                    flush_success = self.flush_cache_after_update()
-                    success = success and bool(flush_success)
-                    if not flush_success:
-                        message = f"{message}; cache flush failed"
-                    else:
-                        pass
-                else:
-                    pass
-
-                if keep_pause_on_failure and not success:
-                    keep_engine_paused = True
-                else:
-                    pass
-                if bool(payload.get("torch_empty_cache", False)):
-                    self.empty_torch_cache()
-                else:
-                    pass
-            finally:
-                if keep_engine_paused:
-                    self._engine_paused = True  # noqa: leading-underscore
-                else:
-                    self._engine_paused = (
-                        previous_pause_state  # noqa: leading-underscore
-                    )
-
-        data: dict[str, object] = {
-            "num_paused_requests": num_paused,
-            "flush_cache": payload.get("flush_cache", True),
-            "flush_success": flush_success,
-            "keep_pause": keep_pause,
-            "engine_paused": self._engine_paused,  # noqa: leading-underscore
-        }
-        data.update(result_data)
-        return {
-            "success": bool(success),
-            "message": str(message),
-            "data": data,
-            "error": None if success else str(message),
-        }
-
-    def admin_update_weights_from_tensor(
-        self, payload: dict[str, object]
-    ) -> AdminActionResult:
-        return self.run_weight_update_with_lifecycle(
-            payload,
-            self.model_worker.update_weights_from_tensor,
-            {
-                "metadata_only": payload.get("serialized_named_tensors") is None,
-            },
-            keep_pause_on_failure=True,
-        )
-
-    def admin_update_weights_from_distributed(
-        self, payload: dict[str, object]
-    ) -> AdminActionResult:
-        return self.run_weight_update_with_lifecycle(
-            payload,
-            self.model_worker.update_weights_from_distributed,
-            {
-                "group_name": payload.get("group_name"),
-                "names": payload.get("names", []),
-            },
-            keep_pause_on_failure=True,
-        )
-
-    def admin_init_weights_update_group(
-        self, payload: dict[str, object]
-    ) -> AdminActionResult:
-        # Note (Xuesong): init blocks on a NCCL/TCP rendezvous and runs on the
-        # scheduler serving thread (admin is drained inline in the event loop), so
-        # the serving loop is frozen until the trainer (rank 0) joins. sglang's
-        # init_weights_update_group exposes no timeout, so a missing trainer
-        # stalls inference up to NCCL's own timeout. Call this only in
-        # coordination with the trainer (the router takes the worker out of
-        # routing for the duration).
-        with self.admin_lock:
-            success, message = self.model_worker.init_weights_update_group(payload)
-        return {
-            "success": bool(success),
-            "message": str(message),
-            "data": {
-                "group_name": payload.get("group_name"),
-                "world_size": payload.get("world_size"),
-                "rank_offset": payload.get("rank_offset"),
-            },
-            "error": None if success else str(message),
-        }
-
-    def admin_destroy_weights_update_group(
-        self, payload: dict[str, object]
-    ) -> AdminActionResult:
-        with self.admin_lock:
-            success, message = self.model_worker.destroy_weights_update_group(payload)
-        return {
-            "success": bool(success),
-            "message": str(message),
-            "data": {"group_name": payload.get("group_name")},
-            "error": None if success else str(message),
-        }
-
-    def admin_weights_checker(self, payload: dict[str, object]) -> AdminActionResult:
-        action = str(payload.get("action") or "checksum")
-        with self.admin_lock:
-            data = self.model_worker.weights_checker(action)
-        return {"success": True, "message": "ok", "data": data}
-
-    def abort_all_requests(self) -> list[str]:
-        request_ids = self.active_request_ids()
-        for request_id in request_ids:
-            self.abort(request_id, defer_running_cleanup=False)
-            # note (Richard Wang): nobody else knows this stage dropped the
-            # request, so end it through its own output path, which reaches the
-            # coordinator however the admin call itself turns out.
-            self.emit_request_error(request_id, AdminDroppedRequestError())
-        seen: set[int] = set()
-        for batch in (self.running_batch, self.cur_batch, self.last_batch):
-            if batch is None or id(batch) in seen:
-                continue
-            else:
-                pass
-            seen.add(id(batch))
-            batch.filter_batch()
-            if not batch.reqs:
-                batch.batch_is_full = False
-            else:
-                pass
-        self.chunked_req = None
-        return request_ids
-
-    def active_request_ids(self) -> list[str]:
-        request_ids: set[str] = set()
-        with self.request_admission_lock:
-            if self.pending_request_builds:
-                request_ids.update(self.pending_request_builds.keys())
-            else:
-                pass
-            if self.pending_request_admissions:
-                request_ids.update(self.pending_request_admissions.keys())
-            else:
-                pass
-            if self.backlogged_request_build_payloads:
-                request_ids.update(
-                    payload.request_id
-                    for payload in self.backlogged_request_build_payloads
-                    if payload.request_id not in self.aborted_request_ids
-                )
-            else:
-                pass
-            for req in self.waiting_queue:
-                rid = req.rid
-                if rid is not None:
-                    request_ids.add(rid)
-                else:
-                    pass
-        # note (Richard Wang): a request whose build waits for upstream chunks
-        # is owned here too, so abort all and the active request check see it.
-        request_ids.update(list(self.deferred_request_payloads))
-        for batch in (
-            self.running_batch,
-            self.cur_batch,
-            self.last_batch,
-            self.async_pending_batch(),
-        ):
-            if batch is None:
-                continue
-            else:
-                pass
-            for req in batch.reqs:
-                if req.rid is not None and not req.finished():
-                    request_ids.add(req.rid)
-                else:
-                    pass
-        return sorted(request_ids)
-
-    def can_update_active_requests(self, previously_paused: bool | None = None) -> bool:
-        engine_paused = (
-            self._engine_paused
-            if previously_paused is None
-            else previously_paused  # noqa: leading-underscore
-        )
-        return bool(engine_paused and self.last_pause_mode == "retract")
-
     def _add_request_to_queue(self, req: Req, is_retracted: bool = False) -> None:
         if req.is_retracted:
             compact_decode_input_history(
@@ -3456,56 +2641,8 @@ class OmniScheduler(Generic[RequestDataT]):
             pass
         _Upstream._add_request_to_queue(self, req, is_retracted=is_retracted)
 
-    def retract_running_requests(self) -> int:
-        """Retract and requeue each unfinished request holding KV, including one cut
-        between chunked extends, which sits only in last_batch and chunked_req."""
-        candidate_requests = list(self.running_batch.reqs)
-        last_batch = self.last_batch
-        if last_batch is not None and last_batch.forward_mode.is_extend():
-            candidate_requests.extend(last_batch.reqs)
-        else:
-            pass
-        if self.chunked_req is not None:
-            candidate_requests.append(self.chunked_req)
-        else:
-            pass
-        requests_by_identity = {id(request): request for request in candidate_requests}
-        retracted_requests = [
-            request
-            for request in requests_by_identity.values()
-            if not request.finished()
-        ]
-        retract_all(
-            reqs=retracted_requests,
-            req_to_token_pool=self.req_to_token_pool,
-            token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-            tree_cache=self.tree_cache,
-            hisparse_coordinator=self.hisparse_coordinator,
-        )
-        self.running_batch.reqs = []
-        self.running_batch.batch_is_full = False
-        self.last_batch = None
-        self.chunked_req = None
-        for request in retracted_requests:
-            self._add_request_to_queue(request)
-        return len(retracted_requests)
-
     def flush_cache(self, empty_cache: bool = True) -> bool:
-        if self.session_bridge is not None and self.session_bridge.sessions:
-            return False
-        else:
-            return _Upstream.flush_cache(self, empty_cache=empty_cache)
-
-    def flush_cache_after_update(self) -> bool:
-        try:
-            return bool(self.flush_cache())
-        except Exception:
-            logger.exception("flush_cache after weight update failed")
-            return False
-
-    @staticmethod
-    def empty_torch_cache() -> None:
-        current_platform.empty_cache()
+        return _Upstream.flush_cache(self, empty_cache=empty_cache)
 
     def mark_running_request_aborted(self, request_id: str) -> bool:
         marked = False
@@ -3621,16 +2758,9 @@ class OmniScheduler(Generic[RequestDataT]):
         # (which is mostly Python-side dispatch into many small CUDA kernels)
         # slows ~600x, dropping audio QPS from >10 to <0.5.
         while self.running:
-            self.process_admin_requests()
             recv_reqs = self.recv_requests()
             recv_reqs.extend(self.take_deferred_request_payloads())
             self.process_input_requests(recv_reqs)
-            if self._engine_paused:  # noqa: leading-underscore
-                self.process_admin_requests()
-                time.sleep(0.001)
-                continue
-            else:
-                pass
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
@@ -3690,7 +2820,7 @@ class OmniScheduler(Generic[RequestDataT]):
         in-flight chunk counters the runner reads at forward time, and the
         lagged result processing would expose them one iteration late.
         """
-        if not self.async_prefill or self.session_bridge is not None:
+        if not self.async_prefill:
             return False
         else:
             pass
@@ -3720,27 +2850,7 @@ class OmniScheduler(Generic[RequestDataT]):
         else:
             pass
 
-    def wait_async_device(self, batch: ScheduleBatch, device_step: PendingStep) -> None:
-        device_steps = [device_step]
-        pending_decode = self.async_pending
-        if (
-            pending_decode is not None
-            and pending_decode.device_step is not device_step
-            and any(
-                request.session is not None and request.session.streaming
-                for request in batch.reqs
-            )
-        ):
-            # note (Junnan Li): Prior-result collection may trim KV still used by the current step.
-            device_steps.append(pending_decode.device_step)
-        else:
-            pass
-        for launched_step in device_steps:
-            launched_step.event.synchronize()
-
-    def resolve_and_process(
-        self, batch, sched_output, pending_step, *, is_device_ready: bool = False
-    ) -> None:
+    def resolve_and_process(self, batch, sched_output, pending_step) -> None:
         """Resolve a launched step and feed it to process_batch_result, after
         dropping requests that already finished in an earlier step.
 
@@ -3755,10 +2865,6 @@ class OmniScheduler(Generic[RequestDataT]):
         _mark_sampler_finished sets) must be KEPT so process_batch_result emits
         it — only reqs finished in a *prior* step are the overrun to drop.
         """
-        if self.session_bridge is not None and not is_device_ready:
-            self.wait_async_device(batch, pending_step)
-        else:
-            pass
         # A request retracted at step S is still in step S+1's lagged batch;
         # drop it like a prior-step finish so its KV is not re-freed.
         pre_finished = [r.finished() or r.is_retracted for r in batch.reqs]
@@ -3793,42 +2899,9 @@ class OmniScheduler(Generic[RequestDataT]):
         else:
             pass
 
-    def process_owned_async(self, pending_decode: PendingDecode) -> None:
-        try:
-            self.resolve_and_process(
-                pending_decode.batch,
-                pending_decode.scheduler_output,
-                pending_decode.device_step,
-                is_device_ready=True,
-            )
-        except Exception as exc:
-            self.handle_batch_failure(pending_decode.batch, exc)
-
     def resolve_pending_async(self) -> None:
-        """Drain launched steps in order, retaining ownership on failed waits."""
-        if self.session_bridge is not None:
-            # note (Junnan Li): Wait before clearing ownership; clear before reentrant callbacks.
-            if self.previous_pending_decode is not None:
-                self.wait_async_device(
-                    self.previous_pending_decode.batch,
-                    self.previous_pending_decode.device_step,
-                )
-                pending_decode, self.previous_pending_decode = (
-                    self.previous_pending_decode,
-                    None,
-                )
-                self.process_owned_async(pending_decode)
-            else:
-                pass
-            if self.async_pending is not None:
-                self.wait_async_device(
-                    self.async_pending.batch, self.async_pending.device_step
-                )
-                pending_decode, self.async_pending = self.async_pending, None
-                self.process_owned_async(pending_decode)
-            else:
-                pass
-        elif self.async_pending is None:
+        """Drain the launched step before processing another batch."""
+        if self.async_pending is None:
             return
         else:
             pending_decode = self.async_pending
@@ -3961,17 +3034,9 @@ class OmniScheduler(Generic[RequestDataT]):
         decode first and run synchronously (the in-flight step is never stranded).
         """
         while self.running:
-            self.process_admin_requests()
             recv_reqs = self.recv_requests()
             recv_reqs.extend(self.take_deferred_request_payloads())
             self.process_input_requests(recv_reqs)
-            if self._engine_paused:  # noqa: leading-underscore
-                self.process_admin_requests()
-                self.resolve_pending_async()
-                time.sleep(0.001)
-                continue
-            else:
-                pass
 
             if (
                 self.async_pending is not None
@@ -4023,22 +3088,14 @@ class OmniScheduler(Generic[RequestDataT]):
                         device_step=pending_step,
                     )
                     if prev_pending is not None:
-                        if self.session_bridge is not None:
-                            self.previous_pending_decode = prev_pending
-                            self.wait_async_device(
-                                prev_pending.batch, prev_pending.device_step
+                        try:
+                            self.resolve_and_process(
+                                prev_pending.batch,
+                                prev_pending.scheduler_output,
+                                prev_pending.device_step,
                             )
-                            self.previous_pending_decode = None
-                            self.process_owned_async(prev_pending)
-                        else:
-                            try:
-                                self.resolve_and_process(
-                                    prev_pending.batch,
-                                    prev_pending.scheduler_output,
-                                    prev_pending.device_step,
-                                )
-                            except Exception as exc:
-                                self.handle_batch_failure(prev_pending.batch, exc)
+                        except Exception as exc:
+                            self.handle_batch_failure(prev_pending.batch, exc)
                     else:
                         pass
             else:
@@ -4083,11 +3140,7 @@ class OmniScheduler(Generic[RequestDataT]):
                 msg = self.inbox.get_nowait()
             except _queue_mod.Empty:
                 break
-            if msg.request_id != request_id or (
-                self.session_bridge is not None
-                and msg.type == "new_request"
-                and is_close_request(msg.data)
-            ):
+            if msg.request_id != request_id:
                 retained.append(msg)
             else:
                 pass
@@ -4131,11 +3184,6 @@ class OmniScheduler(Generic[RequestDataT]):
 
     def close_completed_request(self, req: Req) -> bool:
         request_id = req.rid
-        bridge = self.session_bridge
-        if bridge is not None:
-            bridge.complete(request_id, req.omni_data)
-        else:
-            pass
         with self.request_admission_lock:
             detach_request_data(req)
             self.remember_completed_request(request_id)

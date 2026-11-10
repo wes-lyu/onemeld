@@ -5,12 +5,11 @@ import asyncio
 import logging
 import os
 import time
-import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import AsyncIterator, TypedDict
 
-from sglang_omni.admission import AdminDroppedRequestError, QueueFullError
+from sglang_omni.admission import QueueFullError
 from sglang_omni.config.topology import LogicalProcessPlan
 from sglang_omni.pipeline.control_plane import CoordinatorControlPlane
 from sglang_omni.pipeline.replicas import (
@@ -19,14 +18,9 @@ from sglang_omni.pipeline.replicas import (
     RoundRobinBindingPolicy,
     assign_replica_bindings,
 )
-from sglang_omni.pipeline.session_graph import SessionGraphRunner
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import (
     AbortMessage,
-    AdminMessage,
-    AdminOperation,
-    AdminResult,
-    AdminResultMessage,
     CompleteMessage,
     FreezeGCMessage,
     OmniRequest,
@@ -36,10 +30,7 @@ from sglang_omni.proto import (
     StagePayload,
     StreamMessage,
     SubmitMessage,
-    is_update_action,
 )
-from sglang_omni.proto.admin import AdminResponse
-from sglang_omni.proto.session import DEFAULT_MAX_OUTPUT_LEAD_MS, SessionGraph
 
 logger = logging.getLogger(__name__)
 
@@ -109,15 +100,7 @@ class StreamBacklog:
     reader_idle_since_s: float
 
 
-@dataclass
-class AdminPendingOperation:
-    expected_stages: set[str]
-    action: str
-    results: dict[str, AdminResult] = field(default_factory=dict)
-    future: asyncio.Future[dict[str, AdminResult]] | None = None
-
-
-class Coordinator(SessionGraphRunner):
+class Coordinator:
     """Central coordinator for the multi-stage pipeline.
 
     Responsibilities:
@@ -142,9 +125,6 @@ class Coordinator(SessionGraphRunner):
         binding_policy: BindingPolicy | None = None,
         max_in_flight: int | None = None,
         max_total_backlog_bytes: int | None = None,
-        session_route: Callable[[], list[str]] | None = None,
-        session_graph: SessionGraph | None = None,
-        max_output_lead_ms: float = DEFAULT_MAX_OUTPUT_LEAD_MS,
     ) -> None:
         """Initialize coordinator.
 
@@ -163,22 +143,7 @@ class Coordinator(SessionGraphRunner):
             max_total_backlog_bytes: If set, once all streams together hold
                 more undelivered bytes than this, fail the streams whose
                 readers have been idle longest until the total fits.
-            session_route: Gives the stage chain a Session follows when the
-                caller names none; session_graph the node graph it is
-                instead. A pipeline declares one of them.
-            max_output_lead_ms: How far ahead of real time, counted from
-                a reply's start, a Session delivers the reply's audio.
         """
-        super().__init__(max_output_lead_ms)
-        if session_route is not None and session_graph is not None:
-            raise ValueError(
-                "pass session_route or session_graph, not both: a pipeline's "
-                "Session is one route or one graph"
-            )
-        else:
-            pass
-        self.session_route = session_route
-        self.session_graph = session_graph
         self.entry_stage = entry_stage
         self.terminal_stages: set[str] = (
             set(terminal_stages) if terminal_stages else set()
@@ -223,8 +188,6 @@ class Coordinator(SessionGraphRunner):
         # Abort messages carry only the request ID. A strongly held task keeps
         # local admission closed and lets the broadcast survive caller cancellation.
         self.abort_tasks: dict[str, asyncio.Task[bool]] = {}
-        self.admin_ops: dict[str, AdminPendingOperation] = {}
-        self.admin_lock = asyncio.Lock()
 
         # State
         self.running = False
@@ -248,7 +211,6 @@ class Coordinator(SessionGraphRunner):
 
     async def stop(self) -> None:
         """Stop the coordinator and fail every request it still owns."""
-        await self.stop_sessions()
         # This also rejects later submissions, which would otherwise be sent on
         # the closed control plane and never answered.
         await self.fail_pending_requests(self.fatal_error or "Coordinator stopped")
@@ -278,13 +240,10 @@ class Coordinator(SessionGraphRunner):
                 pass
         self.requests.clear()
         self.partial_results.clear()
-        # Note (Junnan Li): Session pumps await request futures; wake them before waiting for cleanup.
-        await self.fail_sessions(message)
 
     async def shutdown_stages(self, stage_names: Sequence[str] | None = None) -> None:
         """Send shutdown to registered stages, or only to *stage_names*."""
         selected = None if stage_names is None else set(stage_names)
-        await self.shutdown_stage_sessions(selected)
         for name, info in self.stages.items():
             if selected is not None and name not in selected:
                 continue
@@ -296,75 +255,6 @@ class Coordinator(SessionGraphRunner):
             except Exception as e:
                 logger.warning("Failed to send shutdown to stage %s: %s", name, e)
 
-    async def admin(
-        self,
-        action: str,
-        payload: dict[str, object] | None = None,
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 60.0,
-    ) -> AdminResponse:
-        """Run an administrative operation against one or more stages."""
-        if not self.running:
-            raise RuntimeError("Coordinator is not running")
-        else:
-            pass
-
-        target_stages = self.resolve_admin_stages(stages)
-        if not target_stages:
-            raise ValueError("No stages registered for admin operation")
-        else:
-            pass
-
-        op_id = str(uuid.uuid4())
-        loop = asyncio.get_running_loop()
-        pending = AdminPendingOperation(
-            expected_stages=set(target_stages),
-            action=action,
-            future=loop.create_future(),
-        )
-        operation = AdminOperation(
-            op_id=op_id,
-            action=action,
-            payload=dict(payload or {}),
-            target_stages=list(target_stages),
-            timeout_s=timeout_s,
-        )
-
-        async with self.admin_lock:
-            self.admin_ops[op_id] = pending
-            try:
-                for stage_name in target_stages:
-                    info = self.stages[stage_name]
-                    await self.control_plane.send_admin(
-                        stage_name,
-                        info.control_endpoint,
-                        AdminMessage(operation=operation),
-                    )
-
-                assert pending.future is not None
-                results = await asyncio.wait_for(pending.future, timeout=timeout_s)
-            finally:
-                self.admin_ops.pop(op_id, None)
-
-        return self.aggregate_admin_results(
-            op_id=op_id,
-            action=action,
-            results=list(results.values()),
-        )
-
-    async def model_info(
-        self,
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 30.0,
-    ) -> AdminResponse:
-        return await self.admin(
-            "model_info",
-            stages=stages,
-            timeout_s=timeout_s,
-        )
-
     async def freeze_gc(self) -> None:
         """Ask every stage process to freeze its heap; nothing waits for them."""
         for stage_name, stage_info in self.stages.items():
@@ -372,118 +262,8 @@ class Coordinator(SessionGraphRunner):
                 stage_name, stage_info.control_endpoint, FreezeGCMessage()
             )
 
-    async def pause_generation(
-        self,
-        payload: dict[str, object] | None = None,
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 60.0,
-    ) -> AdminResponse:
-        # note (Richard Wang): a pause of every stage in abort mode ends every
-        # request in flight, as SGLang does, even when a stage fails or the call
-        # times out. Requests a stage drops end through their own output path.
-        mode = str((payload or {}).get("mode") or "abort")
-        in_flight = list(self.requests) if mode == "abort" and stages is None else []
-        try:
-            return await self.admin(
-                "pause_generation",
-                payload,
-                stages=stages,
-                timeout_s=timeout_s,
-            )
-        finally:
-            await asyncio.gather(
-                *(self.abort(request_id) for request_id in in_flight),
-                return_exceptions=True,
-            )
-
-    async def continue_generation(
-        self,
-        payload: dict[str, object] | None = None,
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 60.0,
-    ) -> AdminResponse:
-        return await self.admin(
-            "continue_generation",
-            payload,
-            stages=stages,
-            timeout_s=timeout_s,
-        )
-
-    async def update_weights_from_disk(
-        self,
-        payload: dict[str, object],
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 120.0,
-    ) -> AdminResponse:
-        return await self.admin(
-            "update_weights_from_disk",
-            payload,
-            stages=stages,
-            timeout_s=timeout_s,
-        )
-
-    async def init_weights_update_group(
-        self,
-        payload: dict[str, object],
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 300.0,
-    ) -> AdminResponse:
-        return await self.admin(
-            "init_weights_update_group",
-            payload,
-            stages=stages,
-            timeout_s=timeout_s,
-        )
-
-    async def destroy_weights_update_group(
-        self,
-        payload: dict[str, object],
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 300.0,
-    ) -> AdminResponse:
-        return await self.admin(
-            "destroy_weights_update_group",
-            payload,
-            stages=stages,
-            timeout_s=timeout_s,
-        )
-
-    async def update_weights_from_distributed(
-        self,
-        payload: dict[str, object],
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 300.0,
-    ) -> AdminResponse:
-        return await self.admin(
-            "update_weights_from_distributed",
-            payload,
-            stages=stages,
-            timeout_s=timeout_s,
-        )
-
-    async def weights_checker(
-        self,
-        payload: dict[str, object] | None = None,
-        *,
-        stages: Sequence[str] | None = None,
-        timeout_s: float = 120.0,
-    ) -> AdminResponse:
-        return await self.admin(
-            "weights_checker",
-            payload,
-            stages=stages,
-            timeout_s=timeout_s,
-        )
-
     async def submit(self, request_id: str, request: object) -> object:
         """Submit a request to the pipeline and wait for completion."""
-        self.reject_session_metadata(request)
         await self.submit_request(request_id, request)
 
         future = self.completion_futures[request_id]
@@ -499,7 +279,6 @@ class Coordinator(SessionGraphRunner):
         """Submit a request and yield stream events until completion."""
         queue: asyncio.Queue[CompleteMessage | StreamMessage] = asyncio.Queue()
 
-        self.reject_session_metadata(request)
         try:
             await self.submit_request(request_id, request, stream_queue=queue)
             expected_terminal_stages = self.expected_terminal_stages(request_id)
@@ -562,10 +341,6 @@ class Coordinator(SessionGraphRunner):
         request: object,
         *,
         stream_queue: asyncio.Queue[CompleteMessage | StreamMessage] | None = None,
-        target_stage: str | None = None,
-        terminal_stages: set[str] | None = None,
-        replica_bindings: dict[str, int] | None = None,
-        should_bypass_admission: bool = False,
     ) -> None:
         """Submit a request without waiting for completion."""
         if self.fatal_error is not None:
@@ -585,12 +360,7 @@ class Coordinator(SessionGraphRunner):
         else:
             pass
 
-        if (
-            not should_bypass_admission
-            and self.max_in_flight is not None
-            and sum(info.counts_toward_admission for info in self.requests.values())
-            >= self.max_in_flight
-        ):
+        if self.max_in_flight is not None and len(self.requests) >= self.max_in_flight:
             logger.warning(
                 "Rejecting request %s before pipeline submit: in-flight cap "
                 "(max_in_flight=%s)",
@@ -606,15 +376,13 @@ class Coordinator(SessionGraphRunner):
         else:
             pass
 
-        if replica_bindings is None:
-            replica_bindings = assign_replica_bindings(
-                self.logical_process_plan, self.binding_policy, request_id
+        replica_bindings = assign_replica_bindings(
+            self.logical_process_plan, self.binding_policy, request_id
+        )
+        entry_instance = (
+            self.replica_topology.resolve(
+                self.entry_stage, replica_bindings[self.entry_stage]
             )
-        else:
-            pass
-        bindings = replica_bindings or {}
-        entry_instance = target_stage or (
-            self.replica_topology.resolve(self.entry_stage, bindings[self.entry_stage])
             if self.replica_topology.is_replicated(self.entry_stage)
             else self.entry_stage
         )
@@ -629,12 +397,7 @@ class Coordinator(SessionGraphRunner):
             request_id=request_id,
             state=RequestState.PENDING,
             current_stage=self.entry_stage,
-            terminal_stages=(
-                self.resolve_terminal_stages(request)
-                if terminal_stages is None
-                else terminal_stages
-            ),
-            counts_toward_admission=not should_bypass_admission,
+            terminal_stages=self.resolve_terminal_stages(request),
         )
 
         # Create future for completion
@@ -867,8 +630,6 @@ class Coordinator(SessionGraphRunner):
                 msg = await self.control_plane.recv_event()
                 if isinstance(msg, StreamMessage):
                     await self.handle_stream(msg)
-                elif isinstance(msg, AdminResultMessage):
-                    self.handle_admin_result(msg.result)
                 else:
                     await self.handle_completion(msg)
         except asyncio.CancelledError:
@@ -913,26 +674,6 @@ class Coordinator(SessionGraphRunner):
         from_stage = self.replica_topology.logical_name(msg.from_stage)
         if from_stage != msg.from_stage:
             msg = replace(msg, from_stage=from_stage)
-        else:
-            pass
-
-        if not msg.success and AdminDroppedRequestError.matches(msg.error):
-            # A stage dropped this request in an admin action, so it ends as an
-            # abort, the same as a client or pause abort.
-            try:
-                await self.abort(request_id)
-            except Exception:
-                # note (Richard Wang): an abort whose broadcast fails falls back
-                # to the failure path below, which keeps the request owned for a
-                # later abort and still ends it for its caller, so one request
-                # never stops this completion loop.
-                logger.warning(
-                    "Abort of admin-dropped request %s failed, ending it as failed",
-                    request_id,
-                    exc_info=True,
-                )
-            else:
-                return
         else:
             pass
 
@@ -1032,12 +773,6 @@ class Coordinator(SessionGraphRunner):
     async def handle_stream(self, msg: StreamMessage) -> None:
         """Handle a stream chunk from a stage."""
         request_id = msg.request_id
-        handler = self.session_stream_handlers.get(request_id)
-        if handler is not None:
-            handler(msg)
-            return
-        else:
-            pass
         if request_id not in self.stream_backlogs:
             return
         else:
@@ -1141,85 +876,6 @@ class Coordinator(SessionGraphRunner):
                 failed_queue.put_nowait(failure)
             else:
                 await self.handle_completion(failure)
-
-    def handle_admin_result(self, result: AdminResult) -> None:
-        pending = self.admin_ops.get(result.op_id)
-        if pending is None:
-            logger.warning(
-                "Coordinator received admin result for unknown op=%s stage=%s",
-                result.op_id,
-                result.stage,
-            )
-            return
-        else:
-            pass
-        pending.results[result.stage] = result
-        if (
-            pending.future is not None
-            and pending.results.keys() >= pending.expected_stages
-        ):
-            if not pending.future.done():
-                pending.future.set_result(dict(pending.results))
-            else:
-                pass
-        else:
-            pass
-
-    def resolve_admin_stages(self, stages: Sequence[str] | None) -> list[str]:
-        if stages is None:
-            return sorted(self.stages)
-        else:
-            pass
-        # Note (wenyao): dedup preserving order so a caller passing both a
-        # logical name and one of its instances does not double-send admin ops.
-        resolved: list[str] = []
-        for name in stages:
-            for instance in self.replica_topology.instances(name):
-                if instance not in resolved:
-                    resolved.append(instance)
-                else:
-                    pass
-        unknown = sorted(set(resolved) - set(self.stages))
-        if unknown:
-            raise ValueError(f"Unknown admin target stage(s): {unknown}")
-        else:
-            pass
-        return resolved
-
-    def aggregate_admin_results(
-        self,
-        *,
-        op_id: str,
-        action: str,
-        results: list[AdminResult],
-    ) -> AdminResponse:
-        updated_results = [
-            item
-            for item in results
-            if not item.data.get("skipped") and not item.data.get("unsupported")
-        ]
-        if is_update_action(action):
-            success = bool(updated_results) and all(
-                item.success for item in updated_results
-            )
-        else:
-            success = all(item.success for item in results)
-
-        errors = [item.error for item in results if item.error]
-        if success:
-            message = "ok"
-        elif errors:
-            message = "; ".join(errors)
-        else:
-            message = "admin operation did not complete successfully"
-
-        return {
-            "op_id": op_id,
-            "action": action,
-            "success": success,
-            "message": message,
-            "results": [item.to_dict() for item in results],
-        }
 
     def get_request_info(self, request_id: str) -> RequestInfo | None:
         """Get info about a request."""

@@ -174,7 +174,6 @@ def resolve_stage_factory_arg_defaults(
     else:
         pass
 
-    defaults["max_audio_clip_s"] = global_cfg.audio_chunking.max_audio_clip_s
     return defaults
 
 

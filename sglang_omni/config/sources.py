@@ -1,35 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The canonical user-facing surfaces for setting a configuration path.
-
-Two spellings, one path language. In YAML, per-stage settings live under the
-``stages:`` mapping, keyed by stage name::
-
-    config_cls: MossTTSPipelineConfig
-    model_path: OpenMOSS-Team/MOSS-TTS
-
-    stages:
-      tts_engine:
-        tp_size: 2
-        engine:
-          mem_fraction_static: 0.7
-      vocoder:
-        model:
-          dtype: bfloat16
-
-On the command line the same paths appear as dotted flags, with the
-``stages.`` prefix implied -- the flag starts from the stage name, exactly
-as the mapping does::
-
-    sgl-omni serve --config omni.yaml \\
-        --tts_engine.tp_size 2 \\
-        --tts_engine.engine.mem_fraction_static 0.7
-
-Every stage name must be one the config class defines: stage topology --
-which stages exist, how they route, where requests enter -- lives in the
-model's ``config.py`` and is not user configuration. The file overrides
-settings on those stages; every leaf it writes becomes one patch, so
-provenance and conflict detection stay per value.
-"""
+"""Load YAML settings for a declared pipeline topology."""
 
 from __future__ import annotations
 
@@ -45,14 +15,10 @@ from sglang_omni.config.patch import (
     SourceKind,
     Specificity,
 )
-from sglang_omni.config.path import ConfigPath, ConfigPathError, SegmentKind
+from sglang_omni.config.path import ConfigPath
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.utils.json import JsonValue
 
 __all__ = [
-    "dump_user_config",
-    "patches_from_dotted_cli",
-    "patches_from_model_path_flag",
     "patches_from_shared_block",
     "patches_from_stages_mapping",
     "sources_from_config_file",
@@ -112,86 +78,6 @@ _STAGES_LIST_GUIDANCE = (
     "longer accepted. Move each entry under its name and drop the name: "
     "key:\n\n    stages:\n      thinker:\n        tp_size: 2"
 )
-
-
-def patches_from_dotted_cli(
-    extra_args: Mapping[str, object] | Iterable[tuple[str, object]],
-    config: PipelineConfig,
-    *,
-    origin: str = "extra CLI args",
-) -> ConfigPatchSet:
-    """Normalize ``--thinker.engine.mem_fraction_static 0.6`` style arguments.
-
-    The ``stages.`` prefix is implied on the command line -- the flag starts
-    from the stage name, exactly as the YAML ``stages:`` mapping starts from
-    it -- and the explicit prefix is refused so each path has one spelling.
-    Accepts a mapping or ordered ``(key, value)`` pairs; the pairs keep a
-    repeated flag visible, so the resolver's duplicate check rules on it
-    instead of the parser keeping whichever spelling came last.
-    """
-    # Local import: the spelling rewrites are compat's job, and compat imports
-    # this module, so importing it at module level would be a cycle.
-    from sglang_omni.config.compat import canonicalize_dotted_key
-
-    items = extra_args.items() if isinstance(extra_args, Mapping) else extra_args
-    patchset = ConfigPatchSet()
-    for key, value in items:
-        head, _, rest = str(key).partition(".")
-        if head == "stages" and rest:
-            raise ConfigPathError(
-                f"--{key}: the stages. prefix is implied on the command "
-                f"line; write --{rest}",
-                raw=str(key),
-            )
-        else:
-            pass
-        canonical = canonicalize_dotted_key(str(key), config)
-        compiled = ConfigPath.parse(canonical, type(config))
-        if (
-            not compiled.is_leaf
-            and compiled.segments[-1].kind is not SegmentKind.FREEFORM
-        ):
-            # The CLI writes one leaf at a time. A whole group as one flag
-            # value would either replace the container (resetting siblings
-            # other sources set) or need its own merge semantics; the YAML
-            # ``stages:`` mapping is the surface for writing blocks. A
-            # free-form key is exempt: its type is open, so it *is* the leaf.
-            raise ConfigPathError(
-                f"--{key} addresses a settings group, not a single value; "
-                f"write one field below it, e.g. --{key}.<field> <value>",
-                raw=str(key),
-            )
-        else:
-            pass
-        patchset.add(
-            ConfigPatch.create(
-                compiled,
-                value,
-                ConfigSource(SourceKind.CLI_DOTTED, origin),
-                root=type(config),
-            )
-        )
-    return patchset
-
-
-def patches_from_model_path_flag(
-    model_path: str,
-    config: PipelineConfig,
-    *,
-    origin: str = "--model-path",
-) -> ConfigPatchSet:
-    """Translate the typed ``--model-path`` flag into a CLI-layer patch.
-
-    Only needed alongside ``--config``: without a file the flag *selects* the
-    baseline and there is nothing to override. With one, the flag is a command
-    line source like any other and must outrank the file's ``model_path`` --
-    as a patch, so that a launch and ``config explain`` agree on the value and
-    on where it came from.
-    """
-    source = ConfigSource(SourceKind.CLI_FLAG, origin)
-    return ConfigPatchSet().add(
-        ConfigPatch.create("model_path", model_path, source, root=type(config))
-    )
 
 
 def patches_from_shared_block(
@@ -406,19 +292,9 @@ def patches_from_stages_mapping(
 
 def sources_from_config_file(
     file_path: str,
+    config_cls: type[PipelineConfig],
 ) -> tuple[PipelineConfig, ConfigPatchSet]:
-    """Split a config file into the config it declares and its overrides.
-
-    ``ConfigManager.from_file`` folds the returned patches into the config,
-    which is what launching needs and the opposite of what explaining needs:
-    by the time the caller holds the config, the stage entry that set a value
-    has already been absorbed into it. Keeping the two apart is what lets
-    ``sgl-omni config explain`` name the file as a source.
-    """
-    # Local import: the registry pulls in model packages, several of which
-    # import this module's callers.
-    from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
-
+    """Validate the profile and collect its overrides for the config resolver."""
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             try:
@@ -441,13 +317,12 @@ def sources_from_config_file(
         else:
             pass
 
-    if "config_cls" not in data:
+    if data.get("config_cls") != config_cls.__name__:
         raise ValueError(
-            f"Config file {file_path!r} must name its pipeline class in config_cls"
+            f"Config file {file_path!r} must use config_cls: {config_cls.__name__}"
         )
     else:
         pass
-    config_cls = PIPELINE_CONFIG_REGISTRY.get_config_cls_by_name(data["config_cls"])
     stages_block = data.pop("stages", None)
     shared_block = data.pop("shared", None)
     overrides = {key: value for key, value in data.items() if key != "config_cls"}
@@ -511,31 +386,6 @@ def sources_from_config_file(
     else:
         pass
     return config, patches
-
-
-def dump_user_config(config: PipelineConfig) -> dict[str, JsonValue]:
-    """Dump a config in the shape a config file is written in.
-
-    The internal stage list becomes the user-facing ``stages:`` mapping: the
-    key carries the name (so ``name`` leaves the body), and a non-engine
-    stage's ``engine: null`` placeholder is dropped because writing below it
-    is a path error. ``entry_stage`` is dropped too -- it belongs to the
-    model's config class, not to a config file. The result round-trips
-    through :func:`sources_from_config_file` back to an equal config.
-    """
-    data = config.model_dump(mode="json")
-    data.pop("entry_stage", None)
-    stages: dict[str, dict[str, JsonValue]] = {}
-    for stage in data.get("stages", []):
-        body = dict(stage)
-        body.pop("name", None)
-        if body.get("engine") is None:
-            body.pop("engine", None)
-        else:
-            pass
-        stages[stage["name"]] = body
-    data["stages"] = stages
-    return data
 
 
 def flatten(

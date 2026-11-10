@@ -19,9 +19,8 @@ import sglang_omni.scheduling.sglang_backend as sglang_backend
 import sglang_omni.utils.cuda_graph_batch_validator as cuda_graph_batch_validator
 import sglang_omni.utils.device as device_utils
 from sglang_omni.models.qwen3_asr import request_builders
-from sglang_omni.models.qwen3_asr.config import Qwen3ASRPipelineConfig
 from sglang_omni.models.qwen3_asr.stages import create_sglang_qwen3_asr_executor
-from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.models.qwen_umm.config import OneMeldPipelineConfig
 from sglang_omni.scheduling.generation_batch_policy import (
     build_default_cuda_graph_bs,
     build_generation_batch_overrides,
@@ -277,38 +276,6 @@ def test_qwen3_asr_torch_mps_profile_overrides_typed_torch_compile_default() -> 
 
     assert defaults["enable_torch_compile"] is False
     assert overrides["enable_torch_compile"] is False
-
-
-def test_qwen3_asr_config_uses_batched_stage_with_64_running_requests() -> None:
-    config = Qwen3ASRPipelineConfig(model_path="Qwen/Qwen3-ASR-1.7B")
-
-    assert config.entry_stage == "asr"
-    assert [stage.name for stage in config.stages] == ["asr"]
-    assert config.terminal_stages == ["asr"]
-    assert config.gpu_placement == {"asr": 0}
-    stage = config.stages[0]
-    assert stage.factory_path.endswith("create_sglang_qwen3_asr_executor")
-    assert stage.factory.device is None
-    assert stage.engine.max_running_requests == 64
-    assert stage.engine.enable_torch_compile is True
-    assert stage.engine.torch_compile_max_bs == 2
-    assert stage.factory.request_build_max_workers == 8
-    assert stage.factory.request_build_max_pending == 32
-    assert stage.factory.prefill_coalesce_requests == 16
-    assert stage.factory.prefill_coalesce_wait_ms == 40
-    assert stage.factory.prefill_coalesce_when_idle is True
-    assert stage.factory.prefill_coalesce_requires_pending_builds is True
-    assert stage.factory.prefill_coalesce_after_builds_during_decode is True
-    assert stage.factory.enable_pre_lm_encoder is True
-    assert stage.factory.pre_lm_cache_max_entries == 4096
-    assert stage.factory.pre_lm_cache_size_bytes == 2 * 1024**3
-    assert stage.factory.pre_lm_max_batch_size == 8
-    assert stage.factory.pre_lm_max_batch_wait_ms == 0
-    assert type(config).stage_config_cls("asr").engine_stage
-    assert (
-        PIPELINE_CONFIG_REGISTRY.get_config("Qwen3ASRForConditionalGeneration")
-        is Qwen3ASRPipelineConfig
-    )
 
 
 @pytest.mark.parametrize(
@@ -710,7 +677,7 @@ def test_qwen3_asr_cuda_decode_graphs_preserve_operator_buckets(
 
 def test_qwen3_asr_glue_graph_stage_override_is_preserved() -> None:
     """Operators must retain the eager metadata escape hatch at stage resolution."""
-    config = Qwen3ASRPipelineConfig(model_path="Qwen/Qwen3-ASR-1.7B")
+    config = OneMeldPipelineConfig(model_path="image-model")
     config.stage_named("asr").env["SGLANG_ENABLE_METADATA_GLUE_GRAPH"] = "0"
     assert (
         config.resolved_stage_env_defaults("asr")["SGLANG_ENABLE_METADATA_GLUE_GRAPH"]

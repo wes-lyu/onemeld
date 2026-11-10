@@ -16,11 +16,8 @@ INPUT_IMAGE_ID = "input_image"
 USER_ARTIFACT_PREFIX = "user_"
 # Leaves room for a numbered suffix within the 32-character step ID limit.
 MAX_RENAMED_BASE = 28
-ArtifactKind = Literal["text", "image", "video", "audio"]
-CapabilityProtocol = Literal[
-    "native_chat", "native_image", "native_video", "image_base64", "asr", "tts"
-]
-ExecutionMode = Literal["plan", "iterative"]
+ArtifactKind = Literal["text", "image", "audio"]
+CapabilityProtocol = Literal["native_chat", "image_base64", "asr"]
 ContentPart = dict[str, str | dict[str, str]]
 
 
@@ -37,30 +34,12 @@ class ProtocolContract:
 
 PROTOCOLS: dict[CapabilityProtocol, ProtocolContract] = {
     "native_chat": ProtocolContract(
-        input_kinds=frozenset({"text", "image", "video", "audio"}),
+        input_kinds=frozenset({"text", "image"}),
         output_kind="text",
         runtime_fields=frozenset(
             {"messages", "stream", "response_format", "n", "max_new_tokens"}
         ),
         max_media_refs=8,
-        required_kind=None,
-    ),
-    "native_image": ProtocolContract(
-        input_kinds=frozenset({"text", "image"}),
-        output_kind="image",
-        runtime_fields=frozenset(
-            {"prompt", "image_path", "video_path", "num_outputs_per_prompt", "stream"}
-        ),
-        max_media_refs=3,
-        required_kind=None,
-    ),
-    "native_video": ProtocolContract(
-        input_kinds=frozenset({"text", "image"}),
-        output_kind="video",
-        runtime_fields=frozenset(
-            {"prompt", "image_path", "video_path", "num_outputs_per_prompt", "stream"}
-        ),
-        max_media_refs=1,
         required_kind=None,
     ),
     "image_base64": ProtocolContract(
@@ -76,13 +55,6 @@ PROTOCOLS: dict[CapabilityProtocol, ProtocolContract] = {
         runtime_fields=frozenset({"audio_path", "stream"}),
         max_media_refs=1,
         required_kind="audio",
-    ),
-    "tts": ProtocolContract(
-        input_kinds=frozenset({"text"}),
-        output_kind="audio",
-        runtime_fields=frozenset({"text", "stream"}),
-        max_media_refs=0,
-        required_kind=None,
     ),
 }
 
@@ -119,23 +91,6 @@ class UMMArtifact:
             else self.value.size_bytes
         )
 
-    def summary(self, artifact_id: str, text_bytes: int) -> dict[str, JsonValue]:
-        """Planner-facing description, with text cut to text_bytes."""
-        summary: dict[str, JsonValue] = {
-            "id": artifact_id,
-            "kind": self.kind,
-            "action": self.action or "client input",
-            "sha256": self.sha256,
-            "size_bytes": self.size_bytes,
-        }
-        if isinstance(self.value, str):
-            encoded_text = self.value.encode("utf-8")
-            summary["text"] = encoded_text[:text_bytes].decode("utf-8", errors="ignore")
-            summary["truncated"] = self.truncated or len(encoded_text) > text_bytes
-        else:
-            pass
-        return summary
-
 
 class UMMCapability(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -145,7 +100,6 @@ class UMMCapability(BaseModel):
     description: str = Field(min_length=1)
     input_kinds: list[ArtifactKind] = Field(min_length=1)
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
-    speech: dict[str, JsonValue] = Field(default_factory=dict)
 
     @property
     def contract(self) -> ProtocolContract:
@@ -174,23 +128,8 @@ class UMMCapability(BaseModel):
                 "Capability parameters cannot replace runtime-owned inputs "
                 f"{sorted(contract.runtime_fields.intersection(self.parameters))}"
             )
-        elif self.speech and self.protocol != "tts":
-            raise ValueError("Only tts capabilities take speech parameters")
         else:
             return self
-
-
-class UMMTaskBinding(BaseModel):
-    """Bind a task operation and its semantic inputs to an existing capability."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    capability: str
-    description: str = Field(min_length=1)
-    instruction: str = Field(min_length=1)
-    input_types: list[str]
-    output_type: str = Field(min_length=1)
-    requires_input: bool = False
 
 
 class UMMStepCall(BaseModel):
@@ -214,35 +153,11 @@ class UMMExecutionPlan(BaseModel):
     steps: list[UMMPlanStep] = Field(min_length=1)
 
 
-class UMMFinal(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    publish: list[str] = Field(max_length=16)
-    answer: str = Field(max_length=4096)
-
-
-class UMMPlannerTurn(BaseModel):
-    """One iterative planner turn; final None asks to observe the steps' results."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    steps: list[UMMStepCall] = Field(max_length=64)
-    final: UMMFinal | None
-
-    @model_validator(mode="after")
-    def validate_turn(self) -> "UMMPlannerTurn":
-        if not self.steps and self.final is None:
-            raise ValueError("A planner turn must run steps or return final")
-        else:
-            return self
-
-
 @dataclass(frozen=True, kw_only=True)
 class NormalizedSteps:
-    """A reply's steps with free IDs, and the ID each reply name now denotes."""
+    """A plan's steps and their corrected IDs."""
 
     steps: list[UMMStepCall]
-    latest: dict[str, str]
     renames: list[tuple[str, str]]
 
 
@@ -275,7 +190,7 @@ def normalize_steps(steps: list[UMMStepCall], existing: set[str]) -> NormalizedS
         normalized.append(
             step.model_copy(update={"id": step_id, "input_refs": input_refs})
         )
-    return NormalizedSteps(steps=normalized, latest=latest, renames=renames)
+    return NormalizedSteps(steps=normalized, renames=renames)
 
 
 def plan_calls(plan: UMMExecutionPlan) -> list[UMMStepCall]:
@@ -285,29 +200,12 @@ def plan_calls(plan: UMMExecutionPlan) -> list[UMMStepCall]:
     ]
 
 
-def turn_from_plan(plan: UMMExecutionPlan) -> UMMPlannerTurn:
-    """The equivalent single turn of an upfront plan."""
-    return UMMPlannerTurn(
-        steps=plan_calls(plan),
-        final=UMMFinal(
-            publish=[step.id for step in plan.steps if step.publish], answer=""
-        ),
-    )
-
-
-class UMMPlanExample(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    prompt: str = Field(min_length=1, max_length=4096)
-    plan: UMMExecutionPlan
-
-
 class UMMRequestOptions(BaseModel):
     """Client controls of one composition request."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    mode: ExecutionMode | None = None
+    mode: Literal["plan"] | None = None
     image_base64: str | None = None
     max_new_tokens: int | None = Field(default=None, ge=1)
     planning_max_new_tokens: int | None = Field(default=None, ge=256)
@@ -322,22 +220,12 @@ class UMMCompositionSpec(BaseModel):
 
     planner_stage: str = Field(min_length=1)
     capabilities: dict[str, UMMCapability] = Field(min_length=1)
-    task_operations: dict[str, UMMTaskBinding] = Field(default_factory=dict)
-    review_plan: bool = False
-    plan_examples: list[UMMPlanExample] = Field(default_factory=list, max_length=4)
-    execution_mode: ExecutionMode = "plan"
-    allowed_modes: list[ExecutionMode] = Field(
-        default_factory=lambda: ["plan"], min_length=1
-    )
-    max_planner_turns: int = Field(default=4, ge=1, le=16)
     max_steps: int = Field(default=6, ge=1, le=64)
     max_plan_attempts: int = Field(default=1, ge=1, le=3)
     max_images: int = Field(default=4, ge=0, le=16)
-    max_videos: int = Field(default=1, ge=0, le=4)
     max_audios: int = Field(default=2, ge=0, le=8)
     max_input_media: int = Field(default=4, ge=0, le=16)
     max_inline_media_bytes: int = Field(default=8 * 1024 * 1024, ge=1)
-    observation_text_bytes: int = Field(default=2048, ge=64)
     planner_media_kinds: list[MediaKind] = Field(default_factory=lambda: ["image"])
     planning_max_new_tokens: int = Field(default=1536, ge=256)
     planning_temperature: float = Field(default=0.0, ge=0.0)
@@ -363,7 +251,6 @@ class UMMCompositionSpec(BaseModel):
     def media_limits(self) -> dict[ArtifactKind, int]:
         return {
             "image": self.max_images,
-            "video": self.max_videos,
             "audio": self.max_audios,
         }
 
@@ -381,8 +268,6 @@ class UMMCompositionSpec(BaseModel):
             for name in self.capabilities
         ):
             raise ValueError("Capability names must be public identifiers")
-        elif self.execution_mode not in self.allowed_modes:
-            raise ValueError("execution_mode must be one of allowed_modes")
         elif self.audio_instruction_capability is not None and (
             self.audio_instruction_capability not in self.capabilities
             or self.capabilities[self.audio_instruction_capability].protocol != "asr"
@@ -390,57 +275,28 @@ class UMMCompositionSpec(BaseModel):
             raise ValueError("audio_instruction_capability must name an asr capability")
         else:
             pass
-        for name, binding in self.task_operations.items():
-            if not name.isidentifier() or name.startswith("_"):
-                raise ValueError(f"Invalid task operation name: {name}")
-            elif binding.capability not in self.capabilities:
-                raise ValueError(f"Task operation {name} uses an unknown capability")
-            elif self.allowed_modes != ["plan"]:
-                raise ValueError("Task contracts currently require plan-only execution")
-            else:
-                pass
-        for example in self.plan_examples:
-            turn = turn_from_plan(example.plan)
-            self.validate_steps(turn.steps, {}, Counter(), self.max_steps)
-            assert turn.final is not None
-            self.validate_final(turn.final, {step.id for step in turn.steps})
         return self
 
     def required_dispatches(self) -> int:
-        """Controller dispatches the most expensive allowed mode can use."""
-        planner_dispatches = max(
-            self.max_plan_attempts
-            * (
-                self.max_planner_turns
-                if mode == "iterative"
-                else 2 if self.task_operations and self.review_plan else 1
-            )
-            for mode in self.allowed_modes
-        )
         return (
-            planner_dispatches
+            self.max_plan_attempts
             + self.max_steps
             + (self.audio_instruction_capability is not None)
         )
 
     def required_outputs(self) -> int:
-        """Published artifacts, plus an iterative final answer."""
-        return self.max_steps + ("iterative" in self.allowed_modes)
+        return self.max_steps
 
     def validate_steps(
         self,
         steps: list[UMMStepCall],
         artifacts: dict[str, ArtifactKind],
-        generated: Counter[ArtifactKind],
-        remaining_steps: int,
     ) -> None:
-        """Check one batch against the artifacts that already exist."""
+        """Check a plan against its inputs and the request budgets."""
         kinds = dict(artifacts)
-        counts = Counter(generated)
-        if len(steps) > remaining_steps:
-            raise ValueError(
-                f"Composition steps exceed max_steps; {remaining_steps} remain"
-            )
+        counts: Counter[ArtifactKind] = Counter()
+        if len(steps) > self.max_steps:
+            raise ValueError(f"Composition steps exceed max_steps={self.max_steps}")
         else:
             pass
         for step in steps:
@@ -483,16 +339,3 @@ class UMMCompositionSpec(BaseModel):
                 raise ValueError(f"Composition exceeds max_{kind}s={limit}")
             else:
                 pass
-
-    def validate_final(self, final: UMMFinal, producible: set[str]) -> None:
-        """Final output may publish each generated artifact once, never an input."""
-        if len(set(final.publish)) != len(final.publish):
-            raise ValueError("Final output publishes an artifact twice")
-        elif not set(final.publish) <= producible:
-            raise ValueError(
-                f"Final output can publish only step outputs; not {sorted(set(final.publish) - producible)}"
-            )
-        elif not final.publish and not final.answer.strip():
-            raise ValueError("Composition must publish at least one output")
-        else:
-            pass

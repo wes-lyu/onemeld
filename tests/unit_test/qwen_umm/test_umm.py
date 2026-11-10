@@ -1,209 +1,120 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The Qwen examples bind independent checkpoints to the public UMM executor."""
+"""The checked-in request runs through OneMeld's HTTP and composition layers."""
 
-import pytest
+import json
+from pathlib import Path
 
-from sglang_omni.config.manager import ConfigManager
+from fastapi.testclient import TestClient
+
+from sglang_omni.client.client import Client
+from sglang_omni.client.image_media import InlineImage
+from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.runtime import resolve_stage_typed_kwargs
-from sglang_omni.config.schema import FactoryArgs
-from sglang_omni.models.qwen_umm.config import (
-    QwenAnyToAnyEditPipelineConfig,
-    QwenAnyToAnyPipelineConfig,
-    QwenSpeechInPipelineConfig,
-)
-from sglang_omni.pipeline.umm import create_umm_controller
-from sglang_omni.pipeline.umm_composition import UMMCompositionAdapter
-from sglang_omni.platforms import current_platform
+from sglang_omni.config.sources import sources_from_config_file
+from sglang_omni.models.qwen_umm.config import OneMeldPipelineConfig
+from sglang_omni.pipeline.umm import UMMController, create_umm_controller
+from sglang_omni.proto.request import OmniRequest
+from sglang_omni.serve.openai_api import create_app
+from tests.unit_test.fixtures.umm_stages import FakeStages
+
+pytest_plugins = ["tests.unit_test.fixtures.umm_composition"]
 
 
-@pytest.mark.parametrize(
-    "profile, edits",
-    [("launch_any_to_any.yaml", False), ("launch_any_to_any_edit.yaml", True)],
-)
-def test_any_to_any_config_binds_each_checkpoint_to_its_native_stage(
-    profile: str, edits: bool
-) -> None:
-    configuration = ConfigManager.from_file(f"examples/qwen_umm/{profile}").config
-    assert isinstance(configuration, QwenAnyToAnyPipelineConfig)
-    assert isinstance(configuration, QwenAnyToAnyEditPipelineConfig) == edits
-    controller = create_umm_controller(
-        configuration.model_path,
-        output_stage="output",
-        **resolve_stage_typed_kwargs(configuration.stage_named("orchestrator")),
-    )
-    assert isinstance(controller.adapter, UMMCompositionAdapter)
-    model_paths = {
-        "understanding": configuration.text_model_path,
-        "asr": configuration.asr_model_path,
-        "tts_preprocessing": configuration.tts_model_path,
-        "tts_engine": configuration.tts_model_path,
-        "vocoder": configuration.tts_model_path,
-    }
-    for stage_name, model_path in model_paths.items():
-        assert (
-            configuration.stage_factory_kwargs(stage_name)["model_path"] == model_path
-        )
-    assert configuration.stage_factory_kwargs("generation")["inline_media"] is True
-    vocoder = configuration.stage_factory_kwargs("vocoder")
-    assert vocoder["running_stream_count"] == 1
-    assert vocoder.get("async_decode", True) == (
-        current_platform.enable_tts_vocoder_fast_path()
-    )
-    if edits:
-        assert configuration.stage_factory_kwargs("edit") == {
-            "model_path": configuration.edit_model_path,
-            "inline_media": True,
-        }
-    else:
-        pass
-    factory_paths = {
-        "understanding": "sglang_omni.scheduling.native_chat_scheduler.create_native_chat_scheduler",
-        "generation": "sglang_omni.native_generation.stage.create_generation_scheduler",
-        "asr": "sglang_omni.models.qwen3_asr.stages.create_sglang_qwen3_asr_executor",
-        "tts_preprocessing": "sglang_omni.models.qwen3_tts.stages.create_preprocessing_executor",
-        "tts_engine": "sglang_omni.models.qwen3_tts.stages.create_sglang_tts_engine_executor",
-        "vocoder": "sglang_omni.models.qwen3_tts.stages.create_vocoder_executor",
-    }
-    for stage_name, factory_path in factory_paths.items():
-        assert configuration.stage_named(stage_name).factory_path == factory_path
+class ExampleCoordinator:
+    def __init__(self, controller: UMMController, images: list[InlineImage]) -> None:
+        self.controller = controller
+        self.images = images
+        self.dispatches: list[list[str]] = []
 
-
-@pytest.mark.parametrize(
-    "profile, capabilities, default_mode, model_stages",
-    [
-        (
-            "launch.yaml",
-            {"generate_image", "respond"},
-            "plan",
-            {"understanding", "generation"},
-        ),
-        (
-            "launch_speech_in.yaml",
-            {"generate_image", "respond", "transcribe"},
-            "iterative",
-            {"understanding", "generation", "asr"},
-        ),
-        (
-            "launch_edit.yaml",
-            {"edit_image", "respond"},
-            "iterative",
-            {"understanding", "edit"},
-        ),
-    ],
-)
-def test_profiles_without_speech_output_run_both_modes(
-    profile: str, capabilities: set[str], default_mode: str, model_stages: set[str]
-) -> None:
-    """These 4090 profiles declare no TTS stage; loading checks the iterative budget."""
-    configuration = ConfigManager.from_file(f"examples/qwen_umm/{profile}").config
-    adapter = create_umm_controller(
-        configuration.model_path,
-        output_stage="output",
-        **resolve_stage_typed_kwargs(configuration.stage_named("orchestrator")),
-    ).adapter
-    assert isinstance(adapter, UMMCompositionAdapter)
-    assert set(adapter.composition.capabilities) == capabilities
-    assert adapter.composition.execution_mode == default_mode
-    assert set(adapter.composition.allowed_modes) == {"plan", "iterative"}
-    assert {stage.name for stage in configuration.stages} == {
-        "orchestrator",
-        "output",
-        *model_stages,
-    }
-    if isinstance(configuration, QwenSpeechInPipelineConfig):
-        assert configuration.stage_factory_kwargs("asr") == {
-            "model_path": configuration.asr_model_path
-        }
-    else:
-        pass
-    if "edit" in model_stages:
-        # The edit-only profile loads Qwen-Image-Edit from model_path.
-        assert configuration.stage_factory_kwargs("edit") == {"inline_media": True}
-    else:
-        pass
-
-
-def test_reasoning_profile_routes_planning_separately_from_visual_tasks() -> None:
-    configuration = ConfigManager.from_file(
-        "examples/qwen_umm/launch_sensenova_speech_reasoning.yaml"
-    ).config
-    controller = create_umm_controller(
-        configuration.model_path,
-        output_stage="output",
-        **resolve_stage_typed_kwargs(configuration.stage_named("orchestrator")),
-    )
-    composition = controller.adapter.composition
-    assert composition.phases["plan"] == "planning"
-    assert composition.capabilities["respond"].stages == ["understanding"]
-    assert configuration.stage_factory_kwargs("planning")["model_path"] == (
-        "Qwen/Qwen3-4B"
-    )
-    assert configuration.stage_factory_kwargs("understanding")["model_path"] == (
-        "Qwen/Qwen3-VL-4B-Instruct"
-    )
-    assert (
-        resolve_stage_typed_kwargs(configuration.stage_named("planning"))[
-            "server_args_overrides"
-        ]["reasoning_parser"]
-        == "qwen3"
-    )
-    assert composition.planning_temperature == 0.0
-    assert composition.planning_max_new_tokens == 1536
-    assert composition.audio_instruction_capability == "transcribe"
-
-
-def test_controller_budget_below_the_iterative_requirement_is_rejected() -> None:
-    configuration = QwenAnyToAnyPipelineConfig(model_path="model")
-    controller = configuration.stage_named("orchestrator")
-    factory = resolve_stage_typed_kwargs(controller)
-    starved = controller.model_copy(
-        update={
-            "factory": FactoryArgs(
-                **{**factory, "max_dispatches": factory["max_dispatches"] - 1}
+    async def submit(self, request_id: str, request: OmniRequest) -> dict[str, object]:
+        stages = FakeStages(self.controller, request_id)
+        stages.submit(request)
+        dispatches = ["planning"]
+        self.dispatches.append(dispatches)
+        assert set(stages.held) == {"planning"}
+        planner_request = stages.held["planning"].request
+        task = planner_request.inputs[-1]["content"][0]["text"]
+        image_count = 2 if "两张" in task else 1
+        image_ids = [f"picture_{index}" for index in range(image_count)]
+        steps = [
+            {
+                "id": name,
+                "action": "generate_image",
+                "instruction": "Draw a cat",
+                "input_refs": [],
+                "publish": True,
+            }
+            for name in image_ids
+        ]
+        if image_count == 2:
+            steps.append(
+                {
+                    "id": "pick",
+                    "action": "respond",
+                    "instruction": "Compare both photos",
+                    "input_refs": image_ids,
+                    "publish": True,
+                }
             )
-        }
-    )
-    stages = [
-        starved if stage.name == "orchestrator" else stage
-        for stage in configuration.stages
-    ]
-    with pytest.raises(ValueError, match="max_dispatches must cover"):
-        QwenAnyToAnyPipelineConfig(model_path="model", stages=stages)
+        stages.reply("planning", {"text": json.dumps({"steps": steps})})
+        for index in range(image_count):
+            dispatches.append("generation")
+            assert set(stages.held) == {"generation"}
+            generation = stages.held["generation"].request
+            assert generation.params["seed"] == 42 + index
+            stages.reply(
+                "generation",
+                {
+                    "modality": "image",
+                    "image_b64": self.images[index].encoded_content(),
+                },
+            )
+        if image_count == 2:
+            dispatches.append("understanding")
+            assert set(stages.held) == {"understanding"}
+            content = stages.held["understanding"].request.inputs[-1]["content"]
+            assert [
+                part["image_url"]["url"]
+                for part in content
+                if part["type"] == "image_url"
+            ] == [image.url for image in self.images[:2]]
+            stages.reply("understanding", {"text": "I recommend the first image."})
+        return stages.held["output"].data
 
 
-@pytest.mark.parametrize(
-    "profile", ["launch_speech_plan.yaml", "launch_sensenova_speech_plan.yaml"]
-)
-def test_speech_plan_profile_reserves_transcription_before_one_plan(
-    profile: str,
+def test_checked_in_profile_routes_two_requests_differently(
+    inline_images: list[InlineImage],
 ) -> None:
-    configuration = ConfigManager.from_file(f"examples/qwen_umm/{profile}").config
+    base, patches = sources_from_config_file(
+        "examples/onemeld/serve.yaml", OneMeldPipelineConfig
+    )
+    config = ConfigResolver(base).resolve(patches).config
     controller = create_umm_controller(
-        configuration.model_path,
+        config.model_path,
         output_stage="output",
-        **resolve_stage_typed_kwargs(configuration.stage_named("orchestrator")),
+        **resolve_stage_typed_kwargs(config.stage_named("orchestrator")),
     )
-    composition = controller.adapter.composition
-    assert composition.allowed_modes == ["plan"]
-    assert composition.execution_mode == "plan"
-    assert composition.max_plan_attempts == 1
-    assert composition.max_concurrent_steps == 1
-    assert (
-        composition.capabilities[composition.audio_instruction_capability].protocol
-        == "asr"
-    )
-    assert composition.required_dispatches() == composition.max_steps + 2
-    assert (
-        configuration.stage_factory_kwargs("asr")["model_path"] == "Qwen/Qwen3-ASR-0.6B"
-    )
-    if profile == "launch_sensenova_speech_plan.yaml":
-        generation = configuration.stage_named("generation")
-        assert generation.factory_path == (
-            "sglang_omni.models.sensenova_u1.stages.create_generation_executor"
-        )
-        assert configuration.model_path == "SenseNova/SenseNova-U1.5-8B-MoT"
-        assert "inline_media" not in configuration.stage_factory_kwargs("generation")
-        assert resolve_stage_typed_kwargs(generation)["enable_cache_dit"] is True
-        assert composition.capabilities["generate_image"].protocol == "image_base64"
-    else:
-        assert configuration.stage_factory_kwargs("generation")["inline_media"] is True
+    coordinator = ExampleCoordinator(controller, inline_images)
+    request = json.loads(Path("examples/onemeld/compare-cats.json").read_text())
+    with TestClient(create_app(Client(coordinator), model_name=config.name)) as client:
+        first = client.post("/v1/chat/completions", json=request)
+        assert first.status_code == 200
+        segments = first.json()["choices"][0]["message"]["segments"]
+        assert [segment["kind"] for segment in segments] == ["image", "image", "text"]
+        assert [segment["data"]["sha256"] for segment in segments[:2]] == [
+            image.sha256 for image in inline_images[:2]
+        ]
+        assert segments[2]["data"] == "I recommend the first image."
+        request["messages"] = [{"role": "user", "content": "只生成一张猫咪照片"}]
+        second = client.post("/v1/chat/completions", json=request)
+        assert second.status_code == 200
+        assert [
+            segment["kind"]
+            for segment in second.json()["choices"][0]["message"]["segments"]
+        ] == ["image"]
+        assert client.get("/v1/models").json()["data"][0]["id"] == "onemeld"
+        assert client.post("/v1/audio/speech", json={}).status_code == 404
+    assert coordinator.dispatches == [
+        ["planning", "generation", "generation", "understanding"],
+        ["planning", "generation"],
+    ]

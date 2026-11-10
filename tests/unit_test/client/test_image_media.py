@@ -71,7 +71,7 @@ def test_inline_media_rejects_malformed_base64() -> None:
 
 
 @pytest.mark.parametrize(
-    "mime_type", ["image/png", "video/mp4", "audio/wav", "audio/mpeg", "audio/flac"]
+    "mime_type", ["image/png", "audio/wav", "audio/mpeg", "audio/flac"]
 )
 def test_inline_media_round_trips_every_kind(mime_type: str) -> None:
     content = b"media bytes"
@@ -85,7 +85,7 @@ def test_inline_media_round_trips_every_kind(mime_type: str) -> None:
 def test_inline_media_rejects_mismatched_kinds() -> None:
     media = InlineMedia.from_bytes("audio/wav", b"audio")
     with pytest.raises(ValueError, match="cannot have MIME type"):
-        InlineMedia.model_validate({**media.model_dump(), "kind": "video"})
+        InlineMedia.model_validate({**media.model_dump(), "kind": "image"})
     with pytest.raises(ValueError):
         InlineImage.model_validate({**media.model_dump(), "kind": "image"})
     with pytest.raises(ValueError, match="Unsupported"):

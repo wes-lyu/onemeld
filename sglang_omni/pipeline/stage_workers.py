@@ -40,7 +40,7 @@ from sglang_omni.pipeline.tp_control import (
     TPWorkQueueMessage,
 )
 from sglang_omni.platforms import current_platform, get_platform_spec
-from sglang_omni.proto import AbortMessage, AdminResultMessage
+from sglang_omni.proto import AbortMessage
 from sglang_omni.scheduling.message import StageScheduler
 from sglang_omni.utils.gpu_compat import (
     apply_gpu_compat_env_defaults,
@@ -114,7 +114,6 @@ class StageLaunchConfig:
 
     # Unix socket of the stage's HTTP routes, set on the instance that serves
     # them (the single stage or the TP leader) when the stage declares any.
-    http_socket_path: str | None = None
 
     # Endpoints
     recv_endpoint: str = ""
@@ -144,12 +143,8 @@ class StageLaunchConfig:
     # TP internal control (leader -> followers)
     follower_work_queues: list[Queue[TPWorkQueueMessage]] = field(default_factory=list)
     follower_abort_queues: list[Queue[AbortMessage]] = field(default_factory=list)
-    follower_admin_result_queues: list[Queue[AdminResultMessage]] = field(
-        default_factory=list
-    )
     internal_work_queue: Queue[TPWorkQueueMessage] | None = None
     internal_abort_queue: Queue[AbortMessage] | None = None
-    internal_admin_result_queue: Queue[AdminResultMessage] | None = None
 
     @property
     def owns_external_io(self) -> bool:
@@ -602,11 +597,7 @@ class StageGroup:
         for q in self.startup_error_channels:
             close_queue(q)
         for stage_spec in self.specs:
-            for q in (
-                stage_spec.follower_work_queues
-                + stage_spec.follower_abort_queues
-                + stage_spec.follower_admin_result_queues
-            ):
+            for q in stage_spec.follower_work_queues + stage_spec.follower_abort_queues:
                 close_queue(q)
 
     async def shutdown(
@@ -1132,7 +1123,6 @@ def construct_stage(
             recv_endpoint=spec.recv_endpoint,
             work_queue=spec.internal_work_queue,
             abort_queue=spec.internal_abort_queue,
-            admin_result_queue=spec.internal_admin_result_queue,
         )
 
     tp_fanout = None
@@ -1141,7 +1131,6 @@ def construct_stage(
             stage_name=spec.stage_name,
             follower_work_queues=spec.follower_work_queues,
             follower_abort_queues=spec.follower_abort_queues,
-            follower_admin_result_queues=spec.follower_admin_result_queues,
         )
     else:
         pass
@@ -1176,7 +1165,6 @@ def construct_stage(
         is_terminal=spec.is_terminal,
         replica_topology=spec.replica_topology or None,
         allow_child_processes=spec.allow_child_processes,
-        http_socket_path=spec.http_socket_path,
     )
 
     if spec.is_stream_receiver:

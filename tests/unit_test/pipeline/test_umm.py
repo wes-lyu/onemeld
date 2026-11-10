@@ -40,7 +40,6 @@ from sglang_omni.pipeline.umm import (
 )
 from sglang_omni.proto import DataAckMessage, DataReadyMessage
 from sglang_omni.proto.request import OmniRequest, StagePayload
-from sglang_omni.proto.session import SESSION_METADATA_KEY
 from sglang_omni.relay.shm import ShmRelay
 from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.serve.openai_errors import generation_error_status_code
@@ -530,18 +529,15 @@ def test_bounds_reject_the_whole_transition(
     assert [m.type for m in drain(controller)] == ["stream"] * published
 
 
-def test_admission_rejects_excess_and_session_requests_and_keeps_live_ones():
+def test_admission_rejects_excess_and_keeps_live_requests():
     controller = make_controller(SplitAdapter(), limits=limits(max_active=1))
     first = controller.advance(initial())
     assert controller.advance(initial("excess")) is None
-    session = initial("session")
-    session.request.metadata[SESSION_METADATA_KEY] = {"operation": "open"}
-    assert controller.advance(session) is None
     errors = drain(controller)
-    assert [error.request_id for error in errors] == ["excess", "session"]
+    assert [error.request_id for error in errors] == ["excess"]
     assert [
         generation_error_status_code(RuntimeError(str(error.data))) for error in errors
-    ] == [503, 400]
+    ] == [503]
     assert list(controller.contexts) == ["req"]
     done = controller.advance(reply(first, final("done")))
     assert route_umm("req", done) == "output"

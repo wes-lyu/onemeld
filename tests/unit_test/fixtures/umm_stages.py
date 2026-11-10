@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from sglang_omni.client.image_media import InlineMedia
+from sglang_omni.client.image_media import InlineImage
 from sglang_omni.pipeline.umm import UMMController, create_umm_controller, route_umm
 from sglang_omni.pipeline.umm_plan import UMMCompositionSpec
 from sglang_omni.proto.request import OmniRequest, RoutedPayloads, StagePayload
@@ -32,20 +32,8 @@ def sine_waveform(sample_count: int) -> np.ndarray:
     return (0.5 * np.sin(2 * np.pi * 440 * times)).astype(np.float32)
 
 
-def waveform_result(waveform: np.ndarray) -> dict[str, bytes | list[int] | str | int]:
-    """The final payload a native vocoder returns for a non-streamed request."""
-    return {
-        "audio_waveform": waveform.tobytes(),
-        "audio_waveform_shape": list(waveform.shape),
-        "audio_waveform_dtype": "float32",
-        "sample_rate": SAMPLE_RATE,
-        "modality": "audio",
-    }
-
-
-def media_result(media: InlineMedia) -> dict[str, list[dict[str, str | int | float]]]:
-    """The inline result of native generation, with fields the executor ignores."""
-    return {"media": [{**media.model_dump(), "generation_time": 1.0}]}
+def image_result(image: InlineImage) -> dict[str, str]:
+    return {"modality": "image", "image_b64": image.encoded_content()}
 
 
 class FakeStages:

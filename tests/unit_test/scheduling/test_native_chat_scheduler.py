@@ -22,7 +22,7 @@ from sglang_omni.preprocessing.resource_connector import (
     MultiModalResourceConnector,
     ResourceHTTPConnection,
 )
-from sglang_omni.proto import OmniRequest, StagePayload, StreamMessage
+from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling import native_chat_scheduler
 from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.native_chat_scheduler import (
@@ -96,7 +96,7 @@ class Chat:
         message = request.messages[0]
         content = message["content"] if isinstance(message, dict) else message.content
         for part in content if isinstance(content, list) else ():
-            url = (part.get("image_url") or part.get("video_url") or {}).get("url", "")
+            url = (part.get("image_url") or {}).get("url", "")
             if url.startswith("file://"):
                 # Native media loaders read a file URL as its unquoted path.
                 self.files[url] = Path(unquote(urlparse(url).path)).read_bytes()
@@ -230,10 +230,16 @@ def test_native_chat_request_tracks_manager_name_changes():
 
 
 def test_native_text_and_vision_parameters_preserved():
-    original = {
-        "messages": [{"role": "user", "content": "What is here?"}],
-        "images": ["data:image/png,AAAA"],
-    }
+    image = "data:image/png,AAAA"
+    original = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is here?"},
+                {"type": "image_url", "image_url": {"url": image}},
+            ],
+        }
+    ]
     fields = build_chat_fields(
         payload(
             inputs=original,
@@ -246,10 +252,8 @@ def test_native_text_and_vision_parameters_preserved():
         NativeRequest.model_fields,
         "chat",
     )
-    assert (
-        fields["messages"][0]["content"][1]["image_url"]["url"] == original["images"][0]
-    )
-    assert original["messages"][0]["content"] == "What is here?"
+    assert fields["messages"] == original
+    assert fields["messages"][0]["content"] is not original[0]["content"]
     assert (
         fields["temperature"],
         fields["seed"],
@@ -297,7 +301,6 @@ def test_omitted_sampling_resolves_from_the_checkpoint_config(request_):
         payload(inputs=[1, 2]),
         payload(inputs={"messages": [1]}),
         payload(inputs={"messages": [], "images": ["image.png"]}),
-        StagePayload("r1", OmniRequest("x", {}, {"video_fps": 2.0}), None),
         payload(stage_params=[]),
         payload(stage_params={"chat": ["bad"]}),
         payload(n=2),
@@ -321,8 +324,8 @@ def test_unsupported_contracts_reject_before_dispatch(item):
         (True, "https://example.com/a.png", "fetched"),
         (True, "https://example.com/unavailable.png", "server error"),
         (True, "https://example.com/missing.png", "client error"),
-        (True, "file://{allowed}/a%23b%3Fc%25d.mp4", "a#b?c%d.mp4"),
-        (True, "{allowed}/a#b?c%d.mp4", "a#b?c%d.mp4"),
+        (True, "file://{allowed}/a%23b%3Fc%25d.png", "a#b?c%d.png"),
+        (True, "{allowed}/a#b?c%d.png", "a#b?c%d.png"),
         (True, "{outside}/a.png", "refused"),
     ],
 )
@@ -333,7 +336,7 @@ def test_chat_media_follows_the_server_media_policy(
 
     allowed = tmp_path / "allowed"
     allowed.mkdir()
-    (allowed / "a#b?c%d.mp4").write_bytes(b"local video")
+    (allowed / "a#b?c%d.png").write_bytes(b"local image")
     reference = reference.format(allowed=allowed, outside=tmp_path)
     connection = ResourceHTTPConnection()
     connection.async_client = httpx.AsyncClient(
@@ -355,8 +358,14 @@ def test_chat_media_follows_the_server_media_policy(
     monkeypatch.setattr(
         native_chat_scheduler, "get_global_resource_connector", lambda: connector
     )
-    item = payload(inputs={"messages": [{"role": "user", "content": "x"}]})
-    item.request.inputs["videos"] = [reference]
+    item = payload(
+        inputs=[
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": reference}}],
+            }
+        ]
+    )
     with running() as (scheduler, _, chat):
         enqueue(scheduler, item)
         message = scheduler.outbox.get(timeout=3)
@@ -379,7 +388,7 @@ def test_chat_media_follows_the_server_media_policy(
         assert not chat.calls
     else:
         assert message.type == "result"
-        url = chat.calls[0].messages[0]["content"][1]["video_url"]["url"]
+        url = chat.calls[0].messages[0]["content"][0]["image_url"]["url"]
         if outcome == "fetched":
             # Native read the fetched bytes from a file the stage then removed.
             assert chat.files == {url: b"png"}
@@ -387,10 +396,7 @@ def test_chat_media_follows_the_server_media_policy(
         elif outcome == "same":
             assert url == reference
         else:
-            # Native's video loader reads the handed reference back to the file.
-            from sglang.srt.utils.common import get_video_bytes
-
-            assert get_video_bytes(url) == (allowed / outcome).read_bytes()
+            assert url == str((allowed / outcome).resolve())
 
 
 @pytest.mark.parametrize(
@@ -453,56 +459,31 @@ def test_native_scheduler_receives_concurrent_requests_on_one_loop():
         assert {m.request_id for m in messages} == {"r1", "r2", "r3"}
         assert all(m.type == "result" for m in messages)
         assert chat.peak > 1
-        chunk = Client.default_result_builder("r1", messages[0].data.data)
-        assert chunk.text == "你好"
-        assert chunk.output_token_logprobs == [[-0.1, 1, "你"], [-0.2, 2, "好"]]
-        assert chunk.usage.completion_tokens == 2
+        result = messages[0].data.data
+        assert result["text"] == "你好"
+        assert result["output_token_logprobs"] == [[-0.1, 1, "你"], [-0.2, 2, "好"]]
+        assert result["usage"]["completion_tokens"] == 2
 
 
-def test_stream_preserves_unicode_without_duplicate_terminal_text():
+def test_stream_preserves_unicode_and_terminal_usage():
     with running() as (scheduler, engine, chat):
         enqueue(scheduler, payload(stream=True))
-        chunks = []
+        deltas = []
         while True:
-            msg = scheduler.outbox.get(timeout=3)
-            if msg.type == "result":
-                chunks.append(Client.default_result_builder("r1", msg.data.data))
+            message = scheduler.outbox.get(timeout=3)
+            if message.type == "result":
+                result = message.data.data
                 break
-            assert msg.type == "stream"
-            chunks.append(
-                Client.default_stream_builder(
-                    "r1",
-                    StreamMessage(
-                        request_id="r1",
-                        from_stage="chat",
-                        chunk=msg.data,
-                    ),
-                )
-            )
+            assert message.type == "stream"
+            deltas.append(message.data["text"])
 
         assert engine.aborts == []
         assert chat.calls[0].stream_options == {"include_usage": True}
-        assert sum(chunk.finish_reason is not None for chunk in chunks) == 1
-        assert chunks[-1].finish_reason == "stop"
-        assert all(chunk.text for chunk in chunks[:-1])
-
-        class StreamClient(Client):
-            async def generate(self, request, request_id=None):
-                for chunk in chunks:
-                    yield chunk
-
-        async def consume():
-            return [
-                part
-                async for part in StreamClient(None).completion_stream(
-                    GenerateRequest(prompt="Describe the scene", stream=True),
-                    request_id="r1",
-                )
-            ]
-
-        parts = asyncio.run(consume())
-        assert "".join(part.text or "" for part in parts) == "你好 👩🏽‍🚀 e\u0301"
-        assert parts[-1].usage.completion_tokens == 4
+        assert result["finish_reason"] == "stop"
+        assert all(deltas)
+        assert "".join(deltas) == "你好 👩🏽‍🚀 e\u0301"
+        assert result["text"] == "".join(deltas)
+        assert result["usage"]["completion_tokens"] == 4
         assert chat.closed_streams == 1
         assert chat.background_count == 0
 

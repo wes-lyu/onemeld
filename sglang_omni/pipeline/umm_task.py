@@ -12,15 +12,14 @@ from sglang_omni.client.image_media import InlineImage, InlineMedia, MediaKind
 from sglang_omni.pipeline.umm_plan import (
     INPUT_IMAGE_ID,
     ContentPart,
-    ExecutionMode,
     UMMArtifact,
     UMMCompositionSpec,
     UMMRequestOptions,
     media_part,
 )
-from sglang_omni.preprocessing.text import INPUT_AUDIO_MIME_TYPES
 from sglang_omni.proto.request import OmniRequest
 
+INPUT_AUDIO_MIME_TYPES = {"wav": "audio/wav", "mp3": "audio/mpeg"}
 MAX_TASK_MESSAGES = 32
 MAX_TASK_TEXT_BYTES = 16 * 1024
 
@@ -45,13 +44,6 @@ class ImageURLPart(BaseModel):
     image_url: MediaURL | str
 
 
-class VideoURLPart(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    type: Literal["video_url"]
-    video_url: MediaURL | str
-
-
 class AudioURLPart(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -73,7 +65,7 @@ class InputAudioPart(BaseModel):
     input_audio: InputAudio
 
 
-MediaPart = ImageURLPart | VideoURLPart | AudioURLPart | InputAudioPart
+MediaPart = ImageURLPart | AudioURLPart | InputAudioPart
 TaskPart = Annotated[TextPart | MediaPart, Field(discriminator="type")]
 
 
@@ -93,7 +85,6 @@ class ClientTask:
     """A validated request: planner content, step text and client input artifacts."""
 
     options: UMMRequestOptions
-    mode: ExecutionMode
     content: list[ContentPart]
     text: str
     artifacts: dict[str, UMMArtifact]
@@ -112,8 +103,6 @@ def part_media(part: MediaPart, encoded_limit: int) -> InlineMedia:
             )
     elif isinstance(part, ImageURLPart):
         reference, kind = part.image_url, "image"
-    elif isinstance(part, VideoURLPart):
-        reference, kind = part.video_url, "video"
     else:
         reference, kind = part.audio_url, "audio"
     url = reference if isinstance(reference, str) else reference.url
@@ -160,13 +149,6 @@ def parse_task(
         else:
             pass
     parsed_options = UMMRequestOptions.model_validate(options)
-    mode = parsed_options.mode or composition.execution_mode
-    if mode not in composition.allowed_modes:
-        raise ValueError(
-            f"Composition mode {mode} is not allowed; use one of {composition.allowed_modes}"
-        )
-    else:
-        pass
     artifacts: dict[str, UMMArtifact] = {}
     media_counts: Counter[MediaKind] = Counter()
     content: list[ContentPart] = []
@@ -245,7 +227,6 @@ def parse_task(
     else:
         return ClientTask(
             options=parsed_options,
-            mode=mode,
             content=content,
             text=text,
             artifacts=artifacts,

@@ -6,25 +6,17 @@ from __future__ import annotations
 import asyncio
 import atexit
 import ipaddress
-import logging
 import os
 import socket
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import ParseResult, urlparse
-from urllib.request import url2pathname
 
 import httpx
-import numpy as np
-import numpy.typing as npt
-
-from .base import MediaIO
 
 if TYPE_CHECKING:
-    import torch
-    from PIL import Image
+    pass
 else:
     pass
 
@@ -34,22 +26,6 @@ _MAX_HTTP_REDIRECTS = 5
 # Global thread pool for CPU-bound tasks (decoding/resampling)
 global_thread_pool = ThreadPoolExecutor(max_workers=8)
 atexit.register(global_thread_pool.shutdown)
-
-
-async def await_media_cleanup(awaitable: Awaitable[None]) -> None:
-    """Finish cleanup before propagating cancellation of its caller."""
-    cleanup = asyncio.ensure_future(awaitable)
-    cancellation = None
-    while not cleanup.done():
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError as exc:
-            cancellation = exc
-    cleanup.result()
-    if cancellation is not None:
-        raise cancellation
-    else:
-        pass
 
 
 class ResourceHTTPConnection:
@@ -307,7 +283,6 @@ class MultiModalResourceConnector:
 
     def __init__(
         self,
-        media_io_kwargs: dict[str, dict[str, object]] | None = None,
         *,
         connection: ResourceHTTPConnection = global_http_connection,
         allowed_local_media_path: str | Path | None = None,
@@ -318,7 +293,6 @@ class MultiModalResourceConnector:
         """Initialize the media connector.
 
         Args:
-            media_io_kwargs: Additional args passed to process media inputs, keyed by modalities.
             connection: ResourceHTTPConnection instance for HTTP clients.
             allowed_local_media_path: A local directory to load media files from.
             allowed_media_domains: Domains allowed for remote media URLs.
@@ -327,7 +301,6 @@ class MultiModalResourceConnector:
             reject_unsafe_remote_addresses: Whether resolved loopback, private,
                 link-local, reserved, multicast, and unspecified addresses are rejected.
         """
-        self.media_io_kwargs = media_io_kwargs or {}
         self.connection = connection
         allowed_local_media_path = allowed_local_media_path or os.environ.get(
             ALLOWED_LOCAL_MEDIA_PATH_ENV
@@ -396,39 +369,6 @@ class MultiModalResourceConnector:
     async def assert_url_allowed_async(self, url_spec: ParseResult) -> None:
         await asyncio.to_thread(self._assert_url_allowed, url_spec)
 
-    def load_data_url(self, url_spec: ParseResult, media_io: MediaIO[_M]) -> _M:
-        """Load media from a data URL (base64 encoded)."""
-        path = url_spec.path or ""
-        if "," not in path:
-            raise ValueError("Invalid data URL format")
-        else:
-            pass
-        spec, data = path.split(",", 1)
-        if ";base64" not in spec.lower():
-            raise ValueError("Data URL must use base64 encoding")
-        else:
-            pass
-        media_type = spec.split(";")[0].lstrip("/")
-        return media_io.load_base64(media_type, data)
-
-    def load_file_url(self, url_spec: ParseResult, media_io: MediaIO[_M]) -> _M:
-        """Load media from a file URL."""
-        if not self.allowed_local_media_path:
-            raise RuntimeError("Local file loading is disabled.")
-        else:
-            pass
-
-        netloc = url_spec.netloc or ""
-        if netloc and netloc != "localhost":
-            raise ValueError(f"File URL netloc is not supported: {netloc}")
-        else:
-            pass
-        filepath = resolve_local_file(
-            url2pathname(url_spec.path),
-            allowed_local_media_path=self.allowed_local_media_path,
-        )
-        return media_io.load_file(filepath)
-
     def local_media_path(self, path: str | Path) -> str | Path:
         if self.allowed_local_media_path is None:
             return path
@@ -436,142 +376,6 @@ class MultiModalResourceConnector:
             return resolve_local_file(
                 path, allowed_local_media_path=self.allowed_local_media_path
             )
-
-    def load_local_path(self, path: str | Path, media_io: MediaIO[_M]) -> _M:
-        """Load media from a bare local path.
-
-        Bare paths keep the trusted-local behavior of unconfigured servers
-        (allowed), but are scoped to allowed_local_media_path once it is
-        configured. Existence and size checks are delegated to
-        media_io.load_file.
-        """
-        filepath = resolve_local_file(
-            path, allowed_local_media_path=self.allowed_local_media_path
-        )
-        return media_io.load_file(filepath)
-
-    def load_resource(
-        self,
-        url: str,
-        media_io: MediaIO[_M],
-        timeout: float = 30.0,
-        max_bytes: int | None = None,
-    ) -> _M:
-        """Load media from a URL.
-
-        Args:
-            url: URL to load from (HTTP/HTTPS, data, or file).
-            media_io: MediaIO instance to use for loading.
-            timeout: Timeout for HTTP requests in seconds.
-            max_bytes: Optional HTTP response byte cap.
-
-        Returns:
-            Loaded media object.
-        """
-        url_spec = urlparse(url)
-
-        if url_spec.scheme and url_spec.scheme.startswith("http"):
-            data, media_type = self.load_http_bytes(
-                url, timeout=timeout, max_bytes=max_bytes
-            )
-            return media_io.load_http_bytes(data, media_type)
-        else:
-            pass
-
-        if url_spec.scheme == "data":
-            return self.load_data_url(url_spec, media_io)
-        else:
-            pass
-
-        if url_spec.scheme == "file":
-            return self.load_file_url(url_spec, media_io)
-        else:
-            pass
-
-        raise ValueError(f"Unsupported URL scheme: {url_spec.scheme}")
-
-    async def load_resource_async(
-        self,
-        url: str,
-        media_io: MediaIO[_M],
-        timeout: float = 30.0,
-        max_bytes: int | None = None,
-    ) -> _M:
-        """Asynchronously load media from a URL.
-
-        Args:
-            url: URL to load from (HTTP/HTTPS, data, or file).
-            media_io: MediaIO instance to use for loading.
-            timeout: Timeout for HTTP requests in seconds.
-            max_bytes: Optional HTTP response byte cap.
-
-        Returns:
-            Loaded media object.
-        """
-        url_spec = urlparse(url)
-
-        if url_spec.scheme and url_spec.scheme.startswith("http"):
-            download_start = time.time()
-            data, media_type = await self.load_http_bytes_async(
-                url, timeout=timeout, max_bytes=max_bytes
-            )
-            download_time = time.time() - download_start
-
-            if len(data) > 1024 * 1024:
-                logger = logging.getLogger(__name__)
-                logger.debug(
-                    f"Downloaded {len(data) / 1024 / 1024:.2f}MB in "
-                    f"{download_time:.2f}s"
-                )
-            else:
-                pass
-
-            decode_start = time.time()
-            decode_future = asyncio.get_running_loop().run_in_executor(
-                global_thread_pool, media_io.load_http_bytes, data, media_type
-            )
-
-            async def cleanup_http_decoder() -> None:
-                await asyncio.gather(decode_future, return_exceptions=True)
-
-            try:
-                result = await asyncio.shield(decode_future)
-            finally:
-                await await_media_cleanup(cleanup_http_decoder())
-            decode_time = time.time() - decode_start
-
-            if len(data) > 1024 * 1024:
-                logger = logging.getLogger(__name__)
-                logger.debug(
-                    f"Decoded in {decode_time:.2f}s "
-                    f"(total: {download_time + decode_time:.2f}s)"
-                )
-            else:
-                pass
-
-            return result
-        else:
-            pass
-
-        if url_spec.scheme in ["data", "file"]:
-            method = (
-                self.load_data_url if url_spec.scheme == "data" else self.load_file_url
-            )
-            decode_future = asyncio.get_running_loop().run_in_executor(
-                global_thread_pool, method, url_spec, media_io
-            )
-
-            async def cleanup_url_decoder() -> None:
-                await asyncio.gather(decode_future, return_exceptions=True)
-
-            try:
-                return await asyncio.shield(decode_future)
-            finally:
-                await await_media_cleanup(cleanup_url_decoder())
-        else:
-            pass
-
-        raise ValueError(f"Unsupported URL scheme: {url_spec.scheme}")
 
     def load_http_bytes(
         self,
@@ -638,103 +442,6 @@ class MultiModalResourceConnector:
             except httpx.HTTPError as exc:
                 raise media_http_error(exc, current_url) from exc
         raise ValueError(f"Too many redirects while loading media URL: {url}")
-
-    async def fetch_audio_async(
-        self,
-        audio_url: str,
-        *,
-        target_sr: int = 16000,
-        timeout: float = 30.0,
-    ) -> tuple[npt.NDArray[np.float32], float]:
-        """Asynchronously fetch audio from a URL.
-
-        Args:
-            audio_url: URL to the audio file.
-            target_sr: Target sample rate for resampling.
-            timeout: Timeout for HTTP requests in seconds.
-
-        Returns:
-            Tuple of (audio_array, sample_rate).
-        """
-        from .audio import AudioMediaIO
-
-        audio_io = AudioMediaIO(
-            target_sr=target_sr, **self.media_io_kwargs.get("audio", {})
-        )
-
-        return await self.load_resource_async(audio_url, audio_io, timeout=timeout)
-
-    async def fetch_image_async(
-        self,
-        image_url: str,
-        *,
-        image_mode: str = "RGB",
-        timeout: float = 30.0,
-    ) -> Image.Image:
-        """Asynchronously load image from a URL.
-
-        Args:
-            image_url: URL to the image file.
-            image_mode: Target image mode (default: "RGB").
-            timeout: Timeout for HTTP requests in seconds.
-
-        Returns:
-            PIL Image object.
-        """
-        from .image import ImageMediaIO
-
-        image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
-        )
-
-        return await self.load_resource_async(image_url, image_io, timeout=timeout)
-
-    async def fetch_video_async(
-        self,
-        video_url: str,
-        *,
-        fps: float | None = None,
-        max_frames: int | None = None,
-        min_pixels: int | None = None,
-        max_pixels: int | None = None,
-        total_pixels: int | None = None,
-        image_mode: str = "RGB",
-        timeout: float = 30.0,
-        extract_audio: bool = False,
-        audio_target_sr: int = 16000,
-    ) -> tuple[torch.Tensor, float, npt.NDArray[np.float32] | None]:
-        """Asynchronously load video from a URL.
-
-        Args:
-            video_url: URL to the video file.
-            fps: Target FPS for video loading.
-            max_frames: Optional frame cap passed to the video reader backend.
-            min_pixels: Optional lower resize budget per frame.
-            max_pixels: Optional upper resize budget per frame.
-            total_pixels: Optional total video pixel budget.
-            image_mode: Target image mode (default: "RGB").
-            timeout: Timeout for HTTP requests in seconds.
-            extract_audio: If True, extract audio from video and return as third element.
-            audio_target_sr: Target sample rate for audio extraction (default: 16000).
-
-        Returns:
-            Tuple of (video_tensor, sample_fps, audio_or_None).
-        """
-        from .video import VideoMediaIO
-
-        video_io = VideoMediaIO(
-            fps=fps,
-            max_frames=max_frames,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-            total_pixels=total_pixels,
-            image_mode=image_mode,
-            extract_audio=extract_audio,
-            audio_target_sr=audio_target_sr,
-            **self.media_io_kwargs.get("video", {}),
-        )
-
-        return await self.load_resource_async(video_url, video_io, timeout=timeout)
 
 
 _global_connector: MultiModalResourceConnector | None = None

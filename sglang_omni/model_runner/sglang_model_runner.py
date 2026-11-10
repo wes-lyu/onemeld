@@ -27,12 +27,14 @@ from sglang.srt.model_executor.model_runner_components.layer_setup import (
 from sglang.srt.model_executor.runner.prefill_cuda_graph_runner import (
     PrefillCudaGraphRunner,
 )
+from sglang.srt.models.registry import ModelRegistry
 from sglang.srt.runtime_context import get_exec, get_parallel, get_schedule
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.server_args import ServerArgs
 from torch import nn
 
 from sglang_omni.model_runner.prefill_inputs import get_omni_prefill_inputs
+from sglang_omni.models.qwen3_asr.sglang_model import Qwen3ASRForConditionalGeneration
 from sglang_omni.utils.gpu_memory import (
     calculate_stage_budget_available_bytes,
     calculate_stage_load_delta_bytes,
@@ -639,133 +641,13 @@ class SGLModelRunner(ModelRunner):
         )
         if is_breakable and self.prefill_graph_runner_class is not None:
             return self.prefill_graph_runner_class
-        elif (
-            is_breakable
-            and self.model_arch_override == "WhisperForConditionalGeneration"
-        ):
-            from sglang_omni.model_runner.whisper_prefill_cuda_graph_runner import (
-                WhisperPrefillCudaGraphRunner,
-            )
-
-            return WhisperPrefillCudaGraphRunner
         else:
             return None
 
-    def weight_update_blocked_reason(self) -> str | None:
-        ws = self.weight_share_config
-        if ws is None:
-            return None
-        else:
-            pass
-        return (
-            f"weight updates are disabled while same-GPU weight sharing is "
-            f"active (role={ws.role}): replicas alias the leader's storage, "
-            "so an in-place update would corrupt every replica; restart the "
-            "whole replica group with new weights instead"
+    def register_omni_model(self) -> None:
+        ModelRegistry.models["Qwen3ASRForConditionalGeneration"] = (
+            Qwen3ASRForConditionalGeneration
         )
-
-    # Kept on the runner so ModelWorker has one call target and the weight-share
-    # guard applies to every update path.
-    def update_weights_from_disk(self, *args, **kwargs):
-        reason = self.weight_update_blocked_reason()
-        if reason is not None:
-            return False, reason
-        else:
-            pass
-        return self.weight_updater.update_weights_from_disk(*args, **kwargs)
-
-    def update_weights_from_tensor(self, *args, **kwargs):
-        reason = self.weight_update_blocked_reason()
-        if reason is not None:
-            return False, reason
-        else:
-            pass
-        return self.weight_updater.update_weights_from_tensor(*args, **kwargs)
-
-    def update_weights_from_distributed(
-        self,
-        names: list[str],
-        dtypes: list[str],
-        shapes: list[list[int]],
-        group_name: str,
-        load_format: str | None = None,
-    ) -> tuple[bool, str]:
-        reason = self.weight_update_blocked_reason()
-        if reason is not None:
-            return False, reason
-        else:
-            pass
-        try:
-            weights = self.weight_updater.receive_weights_from_distributed(
-                names=names,
-                dtypes=dtypes,
-                shapes=shapes,
-                group_name=group_name,
-                load_format=load_format,
-            )
-        except Exception as error:
-            message = f"Failed to receive weights: {error}"
-            logger.error(message)
-            return False, message
-        return self.weight_updater.load_weights_from_distributed(weights)
-
-    # Process-group lifecycle does not mutate weights, so it stays unguarded.
-    def init_weights_update_group(self, *args, **kwargs):
-        return self.weight_updater.init_weights_update_group(*args, **kwargs)
-
-    def destroy_weights_update_group(self, *args, **kwargs):
-        return self.weight_updater.destroy_weights_update_group(*args, **kwargs)
-
-    def register_omni_model(self):
-        # Register sglang_omni model classes directly in SGLang's model registry.
-        import importlib
-
-        from sglang.srt.models.registry import ModelRegistry
-
-        sglang_omni_models = {
-            "S2ProSGLangTextModel": "sglang_omni.models.fishaudio_s2_pro.sglang_model:S2ProSGLangTextModel",
-            "Qwen3OmniTalker": "sglang_omni.models.qwen3_omni.components.talker:Qwen3OmniTalker",
-            "Qwen3OmniThinkerForCausalLM": "sglang_omni.models.qwen3_omni.components.sglang_thinker:Qwen3OmniThinkerForCausalLM",
-            "HiggsMultimodalQwen3ForConditionalGeneration": "sglang_omni.models.higgs_tts.model:HiggsTTSModel",
-            "Qwen3TTSTalker": "sglang_omni.models.qwen3_tts.sglang_model:Qwen3TTSTalker",
-            "MiniCPMOTalkerForCausalLM": "sglang_omni.models.minicpm_o.components.sglang_talker:MiniCPMOTalkerForCausalLM",
-            "MingTTSSGLangModel": "sglang_omni.models.ming_tts.sglang_model:MingTTSSGLangModel",
-            "MossTTSDelaySGLangModel": "sglang_omni.models.moss_tts.sglang_model:MossTTSDelaySGLangModel",
-            "MossTTSLocalSGLangModel": "sglang_omni.models.moss_tts_local.sglang_model:MossTTSLocalSGLangModel",
-            "MossTranscribeDiarizeForConditionalGeneration": "sglang_omni.models.moss_transcribe_diarize.sglang_model:MossTranscribeDiarizeForConditionalGeneration",
-            "VoxtralSGLangTTSModel": "sglang_omni.models.voxtral_tts.sglang_model:VoxtralSGLangTTSModel",
-            "Zonos2SGLangModel": "sglang_omni.models.zonos2.sglang_model:Zonos2SGLangModel",
-            "LLaDA2MoeModelLM": "sglang_omni.models.llada2_uni.components.thinker:LLaDA2MoeModelLM",
-            "WhisperForConditionalGeneration": "sglang_omni.models.whisper_asr.sglang_model:WhisperForConditionalGeneration",
-            "Qwen3ASRForConditionalGeneration": "sglang_omni.models.qwen3_asr.sglang_model:Qwen3ASRForConditionalGeneration",
-            "FunAsrNanoForConditionalGeneration": "sglang_omni.models.fun_asr.sglang_model:FunAsrNanoForConditionalGeneration",
-            "ArkasrForConditionalGeneration": "sglang_omni.models.arkasr.sglang_model:ArkasrForConditionalGeneration",
-            "DotsTTSForConditionalGeneration": "sglang_omni.models.dots_tts.sglang_model:DotsTTSSGLangModel",
-            "FunCosyVoice3SGLangModel": "sglang_omni.models.fun_cosyvoice3.sglang_model:FunCosyVoice3SGLangModel",
-            "NemotronVoiceChatForCausalLM": "sglang_omni.models.nemotron_voicechat.thinker:NemotronVoiceChatForCausalLM",
-            "NemotronVoiceChatTalker": "sglang_omni.models.nemotron_voicechat.talker:NemotronVoiceChatTalker",
-            "PersonaPlexForCausalLM": "sglang_omni.models.personaplex.sglang_model:PersonaPlexForCausalLM",
-            "MiniCPMO": "sglang_omni.models.minicpm_o.components.sglang_thinker:MiniCPMOThinkerForCausalLM",
-        }
-        for arch, path in sglang_omni_models.items():
-            module_path, _, attr = path.partition(":")
-            try:
-                ModelRegistry.models[arch] = getattr(
-                    importlib.import_module(module_path), attr
-                )
-            except Exception as exc:
-                logger.warning(f"sglang-omni: skipping model {arch} ({exc})")
-
-        try:
-            from sglang_omni.models.ming_omni.registration import (
-                register_ming_hf_config,
-                register_ming_model_registry,
-            )
-
-            register_ming_hf_config()
-            register_ming_model_registry()
-        except Exception as exc:
-            logger.warning(f"sglang-omni: skipping Ming-Omni registration ({exc})")
 
     def init_kv_cache_configurator(self):
         """Swap in the Omni configurator so the colocated budget stays hooked.

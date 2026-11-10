@@ -28,7 +28,6 @@ from sglang_omni.config.schema import PipelineConfig, StageConfig
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.pipeline.umm_plan import COMPOSITION_ADAPTER_PATH, UMMCompositionSpec
 from sglang_omni.proto.request import OmniRequest, RoutedPayloads, StagePayload
-from sglang_omni.proto.session import SESSION_METADATA_KEY
 from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 from sglang_omni.utils.imports import import_string
@@ -412,12 +411,7 @@ class UMMController(
             pass
 
     def admit(self, payload: StagePayload) -> UMMContext:
-        if SESSION_METADATA_KEY in payload.request.metadata:
-            raise UMMRequestError(
-                "UMM pipelines do not support session operations. "
-                "Submit ordinary requests instead"
-            )
-        elif len(self.contexts) >= self.limits.max_active:
+        if len(self.contexts) >= self.limits.max_active:
             raise QueueFullError()
         else:
             pass
@@ -910,7 +904,6 @@ class UMMPipelineConfig(PipelineConfig):
 
     umm_controller_stage: ClassVar[str] = "orchestrator"
     umm_output_stage: ClassVar[str] = "output"
-    interleaved_output: ClassVar[bool] = True
 
     @classmethod
     def process_local_edges(cls) -> frozenset[tuple[str, str]]:

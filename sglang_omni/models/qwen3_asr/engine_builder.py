@@ -61,6 +61,7 @@ else:
     pass
 
 logger = logging.getLogger(__name__)
+DEFAULT_ENCODER_GRAPH_CLIP_SECONDS = 30.0
 
 
 QWEN3_ASR_FULL_PREFILL_MAX_REQUESTS = 32
@@ -413,12 +414,11 @@ class Qwen3ASREngineBuilder(AsrEngineBuilder[Qwen3ASRRequestData]):
             from sglang_omni.models.qwen3_asr.audio_lengths import (
                 qwen3_asr_num_audio_tokens,
             )
-            from sglang_omni.models.qwen3_asr.config import QWEN3_ASR_AUDIO_CHUNKING
 
             clip_s = (
                 self.max_audio_clip_s
                 if self.max_audio_clip_s is not None
-                else QWEN3_ASR_AUDIO_CHUNKING.max_audio_clip_s
+                else DEFAULT_ENCODER_GRAPH_CLIP_SECONDS
             )
             max_tokens_per_clip = qwen3_asr_num_audio_tokens(int(clip_s * 100))
             model.init_encoder_graphs(

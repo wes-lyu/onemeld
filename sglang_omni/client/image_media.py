@@ -7,10 +7,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-MediaKind = Literal["image", "video", "audio"]
+MediaKind = Literal["image", "audio"]
 MEDIA_MIME_TYPES: dict[MediaKind, tuple[str, ...]] = {
     "image": ("image/png", "image/jpeg", "image/webp"),
-    "video": ("video/mp4",),
     "audio": ("audio/wav", "audio/mpeg", "audio/flac"),
 }
 
@@ -99,5 +98,4 @@ class InlineImage(InlineMedia):
         )
 
     def encoded_image(self) -> str:
-        # note (Wes): the Images API routes and SenseNova call this name.
         return self.encoded_content()

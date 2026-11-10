@@ -4,47 +4,15 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, TypedDict
+from typing import ClassVar, Literal, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.main import IncEx
 from typing_extensions import Unpack
 
-from sglang_omni.proto.session import (
-    DEFAULT_MAX_OUTPUT_LEAD_MS,
-    ControlEdge,
-    DataEdge,
-    SessionGraph,
-    SessionNode,
-)
-
-if TYPE_CHECKING:
-    from sglang_omni.serve.realtime.transcription_session import StreamingASRStrategy
-else:
-    pass
 REPLICA_SEPARATOR = "@r"
-
-
-@dataclass(frozen=True, slots=True)
-class RealtimeTranscriptionConfig:
-    """Pipeline-owned declaration for live ASR over /v1/realtime."""
-
-    strategy_cls: type[StreamingASRStrategy]
-    decode_interval_ms: int = 2000
-    server_vad: bool = False
-    max_segment_s: float | None = None
-
-    def __post_init__(self) -> None:
-        if self.decode_interval_ms <= 0:
-            raise ValueError("realtime transcription decode interval must be positive")
-        else:
-            pass
-        if self.max_segment_s is not None and self.max_segment_s <= 0:
-            raise ValueError("realtime transcription max_segment_s must be positive")
-        else:
-            pass
 
 
 def replica_instance_name(logical_name: str, replica_id: int) -> str:
@@ -82,7 +50,6 @@ logger = logging.getLogger(__name__)
 PLACEMENT_OWNED_FACTORY_KWARGS = frozenset(
     {"gpu_id", "total_gpu_memory_fraction", "process_total_gpu_memory_fraction"}
 )
-MAX_SPEECH_INPUT_CHARS: int = 4096
 
 
 def parse_memory_bytes(field_name: str, value: int | str | None) -> int | None:
@@ -262,16 +229,6 @@ class FactoryArgs(BaseModel):
             pass
 
 
-class ServiceConfig(BaseModel):
-    """A service the pipeline talks to, started before it when its port does not answer."""
-
-    model_config = ConfigDict(extra="forbid")
-    name: str = Field(min_length=1)
-    command: list[str] = Field(min_length=1)
-    port: int = Field(gt=0, lt=65536)
-    env: dict[str, str] = Field(default_factory=dict)
-
-
 class PlacementConfig(BaseModel):
     """Pipeline-level placement planning limits."""
 
@@ -342,36 +299,6 @@ class ProcessConfig(BaseModel):
             pass
 
 
-def normalize_route_prefixes(stage: str, prefixes: Iterable[str]) -> tuple[str, ...]:
-    """Validate the path prefixes a stage declares and return them in order.
-
-    A prefix starts with a slash, names at least one path segment, and covers
-    itself and everything below it.
-    """
-    out: list[str] = []
-    for prefix in prefixes:
-        if not isinstance(prefix, str) or not prefix.startswith("/"):
-            raise ValueError(
-                f"stages.{stage}.http_routes entries must be paths starting "
-                f"with '/', got {prefix!r}"
-            )
-        else:
-            pass
-        stripped = prefix.rstrip("/")
-        if not stripped or "?" in stripped or "#" in stripped:
-            raise ValueError(
-                f"stages.{stage}.http_routes entry {prefix!r} must name a path "
-                "below '/'"
-            )
-        elif stripped in out:
-            raise ValueError(
-                f"stages.{stage}.http_routes lists {stripped!r} more than once"
-            )
-        else:
-            out.append(stripped)
-    return tuple(out)
-
-
 class StageConfig(BaseModel):
     """Single pipeline stage configuration.
 
@@ -439,18 +366,8 @@ class StageConfig(BaseModel):
     disable_direct_cuda_ipc_payload: bool = False
     project_payload: dict[str, str] = Field(default_factory=dict)
     comm: CommConfig | None = None
-    http_routes: list[str] = Field(
-        default_factory=list,
-        description="Path prefixes of HTTP routes this stage serves from its own process. The Omni server relays every request under them to the stage, whose scheduler provides the app through http_app(), so the routes start with the stage and the HTTP process never imports the runtime behind them. The stage must run as one instance.",
-    )
 
     def model_post_init(self, __context: object = None) -> None:
-        if self.http_routes:
-            self.http_routes = list(
-                normalize_route_prefixes(self.name, self.http_routes)
-            )
-        else:
-            pass
         if self.runtime_gpu_ids is not None:
             if not self.allow_child_processes or self.tp_size != 1:
                 raise ValueError(
@@ -470,12 +387,6 @@ class StageConfig(BaseModel):
                 )
             else:
                 pass
-        else:
-            pass
-        if self.http_routes:
-            self.http_routes = list(
-                normalize_route_prefixes(self.name, self.http_routes)
-            )
         else:
             pass
         if isinstance(self.gpu, int) and self.tp_size > 1:
@@ -571,43 +482,6 @@ class EngineStageConfig(StageConfig):
 DEFAULT_MAX_CONCURRENT_LONG_AUDIO_REQUESTS = 4
 
 
-def default_max_concurrent_long_audio_requests(
-    max_running_requests: int | None, max_concurrent_chunks: int
-) -> int:
-    if max_running_requests is None or max_running_requests < 1:
-        return DEFAULT_MAX_CONCURRENT_LONG_AUDIO_REQUESTS
-    else:
-        pass
-    return max(1, max_running_requests // (2 * max(int(max_concurrent_chunks), 1)))
-
-
-class AudioChunkingConfig(BaseModel):
-    """Operator-tunable scheduling policy for long-audio transcription.
-
-    These are the knobs a deployment may set (YAML or dotted CLI overrides).
-    The model-owned side of the contract -- whether chunking is allowed at
-    all, the native clip limit, the tail floor -- lives on PipelineConfig
-    ClassVars, out of reach of configuration.
-    """
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    max_audio_clip_s: float = Field(default=30.0, gt=0)
-    max_total_audio_s: float | None = Field(default=3600.0, gt=0)
-    max_concurrent_chunks: int = Field(default=8, ge=1)
-    max_concurrent_long_audio_requests: int | None = Field(default=None, ge=1)
-
-    def model_post_init(self, __context: object = None) -> None:
-        if (
-            self.max_total_audio_s is not None
-            and self.max_total_audio_s < self.max_audio_clip_s
-        ):
-            raise ValueError(
-                f"max_total_audio_s={self.max_total_audio_s} must be at least max_audio_clip_s={self.max_audio_clip_s}"
-            )
-        else:
-            pass
-
-
 class StreamDeliveryConfig(BaseModel):
     """Cap on undelivered stream bytes the coordinator holds for all readers together.
 
@@ -616,46 +490,6 @@ class StreamDeliveryConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     max_total_backlog_bytes: int | None = Field(default=1024 * 1024 * 1024, ge=1)
-
-
-@dataclass(frozen=True)
-class ResolvedAudioChunking:
-    """The merged long-audio contract the transcription handlers consume.
-
-    Built by PipelineConfig.resolved_audio_chunking from the model's ClassVars and the operator policy.
-    """
-
-    allow_audio_chunking: bool = False
-    max_audio_clip_s: float = 30.0
-    max_native_clip_s: float | None = None
-    max_total_audio_s: float | None = 3600.0
-    min_tail_s: float = 0.5
-    max_concurrent_chunks: int = 8
-    max_concurrent_long_audio_requests: int = DEFAULT_MAX_CONCURRENT_LONG_AUDIO_REQUESTS
-    condition_on_previous_text: bool = False
-
-    @classmethod
-    def disabled(cls) -> "ResolvedAudioChunking":
-        return cls()
-
-    @property
-    def stream_clip_limit_s(self) -> float:
-        """Longest clip the un-chunkable streaming path accepts."""
-        return (
-            self.max_native_clip_s
-            if self.max_native_clip_s is not None
-            else self.max_audio_clip_s
-        )
-
-    def chunk_samples(self, sample_rate: int) -> int:
-        """Chunk length in samples, at least one sample."""
-        return max(int(self.max_audio_clip_s * sample_rate), 1)
-
-
-@dataclass(frozen=True)
-class CustomVoiceConfig:
-    speakers: tuple[str, ...]
-    task_type: str
 
 
 class SerializationFallback(Protocol):
@@ -679,89 +513,15 @@ class ModelDumpOptions(TypedDict, total=False):
     polymorphic_serialization: bool | None
 
 
-class SessionControlEdgeConfig(BaseModel):
-    """An input of a node written `{"kind": "control", "source", "event"}`: the control event of `source` reaches the node as a control operation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    kind: Literal["control"]
-    source: str
-    event: str
-    preempt: bool = False
-
-    def edge(self) -> ControlEdge:
-        """The runtime edge; the declaration's `preempt` is the edge's `should_preempt`."""
-        return ControlEdge(
-            source=self.source,
-            event=self.event,
-            should_preempt=self.preempt,
-        )
-
-
-class SessionDataEdgeConfig(BaseModel):
-    """An input of a stage node written `{"source", "capacity", "overflow", "feedback"}`: the `source` of a plain input with the bound of its edge (see `DataEdge`)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    source: str
-    capacity: int | None = Field(default=None, gt=0)
-    overflow: Literal["block", "drop_oldest"] = "block"
-    feedback: bool = False
-
-    def edge(self) -> DataEdge:
-        return DataEdge(self.source, self.capacity, self.overflow, self.feedback)
-
-
-class SessionNodeConfig(BaseModel):
-    """One stage route of the Session graph and the sources it reads."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    stages: list[str] = Field(min_length=1)
-    inputs: list[str | SessionDataEdgeConfig | SessionControlEdgeConfig] = Field(
-        min_length=1
-    )
-
-
 class PipelineConfig(BaseModel):
-    """Top-level pipeline configuration.
-
-    Subclasses set ``requires_model_capabilities`` when their model package
-    must export static architecture-level capability metadata.
-    """
+    """Top-level pipeline configuration."""
 
     model_config = ConfigDict(extra="forbid")
     architecture: ClassVar[str | None] = None
-    architecture_aliases: ClassVar[tuple[str, ...]] = ()
-    requires_model_capabilities: ClassVar[bool] = False
-    supports_image_api: ClassVar[bool] = False
-    image_api_registrar: ClassVar[str | None] = None
     tensor_parallel_disable_custom_all_reduce_stages: ClassVar[tuple[str, ...]] = ()
-    required_speech_reference_count: ClassVar[int | None] = None
-    speech_reference_text_required: ClassVar[bool] = False
-    speech_reference_text_excludes_instructions: ClassVar[bool] = False
-    additional_speech_languages: ClassVar[frozenset[str]] = frozenset()
-    realtime_transcription: ClassVar[RealtimeTranscriptionConfig | None] = None
-    realtime_deployment_factory: ClassVar[str | None] = None
-    # True when results are ordered interleaved (UMM) segments, which
-    # /generate can stream.
-    interleaved_output: ClassVar[bool] = False
-    is_realtime_only: ClassVar[bool] = False
-    # Import path of the function that builds, from this config, the chat,
-    # speech or transcription request the server sends itself before it reports
-    # ready; None skips the warmup.
-    server_warmup_request_factory: ClassVar[str | None] = None
-    allow_audio_chunking: ClassVar[bool] = False
-    max_native_clip_s: ClassVar[float | None] = None
-    min_tail_s: ClassVar[float] = 0.5
-    condition_on_previous_text: ClassVar[bool] = False
-    max_speech_input_chars: ClassVar[int | None] = MAX_SPEECH_INPUT_CHARS
-    # None accepts every speech request field and ignores unknown ones.
-    supported_speech_fields: ClassVar[frozenset[str] | None] = None
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {}
     "Stage name -> ``StageConfig`` subclass for this pipeline's stage types.\n\n    The mapping is what makes a stage's type survive a dump/rebuild round\n    trip: the resolver mutates ``model_dump()`` output and reconstructs the\n    config, and this is how each stage document gets validated against its\n    own subclass (engine marker, model-specific ``model.*`` fields) instead\n    of the base ``StageConfig``. Stage names absent from the mapping --\n    including stages a user file adds -- validate as plain ``StageConfig``.\n    "
     model_path: str
-    audio_chunking: AudioChunkingConfig = Field(default_factory=AudioChunkingConfig)
     stream_delivery: StreamDeliveryConfig = Field(default_factory=StreamDeliveryConfig)
     stages: list[StageConfig]
     name: str | None = None
@@ -775,14 +535,6 @@ class PipelineConfig(BaseModel):
     endpoints: EndpointsConfig = Field(default_factory=EndpointsConfig)
     terminal_stages_fn: str | None = None
     config_cls: str | None = None
-    session_nodes: dict[str, SessionNodeConfig] = Field(default_factory=dict)
-    "The Session as a graph of stage routes; empty when the Session is the one route from the entry stage."
-    session_publish: dict[str, list[str]] = Field(default_factory=dict)
-    "Per node of the graph, the chunk formats that reach the client."
-    max_output_lead_ms: float = Field(default=DEFAULT_MAX_OUTPUT_LEAD_MS, gt=0)
-    "How far ahead of real time, counted from a reply's start, a Session delivers the reply's audio; an interruption cannot take back audio already delivered."
-    services: list[ServiceConfig] = Field(default_factory=list)
-    "The services started in this order before the pipeline, each waited for until its /v1/models answers."
 
     def model_dump(self, **kwargs: Unpack[ModelDumpOptions]) -> dict[str, object]:
         """Dump with each stage serialized by its runtime class.
@@ -822,75 +574,11 @@ class PipelineConfig(BaseModel):
         self.validate_general()
         self.validate_processes()
 
-        native = type(self).max_native_clip_s
-        if native is not None and self.audio_chunking.max_audio_clip_s > native:
-            raise ValueError(
-                f"audio_chunking.max_audio_clip_s={self.audio_chunking.max_audio_clip_s:g} must not exceed the model's native clip limit ({native:g}s)"
-            )
-        else:
-            pass
-        if self.audio_chunking.max_audio_clip_s < type(self).min_tail_s:
-            raise ValueError(
-                f"audio_chunking.max_audio_clip_s={self.audio_chunking.max_audio_clip_s:g} must be at least the model's minimum useful clip length ({type(self).min_tail_s:g}s)"
-            )
-        else:
-            pass
         self.config_cls = self.__class__.__name__
         if self.name is None:
             self.name = self.model_path
         else:
             pass
-        self.warn_long_audio_admission_exceeds_engine()
-
-    def warn_long_audio_admission_exceeds_engine(self) -> None:
-        """Warn when long audio alone can fill every engine running slot."""
-        if not type(self).allow_audio_chunking:
-            return
-        else:
-            pass
-        explicit = self.audio_chunking.max_concurrent_long_audio_requests
-        engine = self.stage_named(self.resolved_entry_stage).engine
-        max_running = engine.max_running_requests if engine is not None else None
-        if explicit is None or max_running is None:
-            return
-        else:
-            pass
-        chunks = self.audio_chunking.max_concurrent_chunks
-        if explicit * chunks >= max_running:
-            logger.warning(
-                "audio_chunking.max_concurrent_long_audio_requests=%d x max_concurrent_chunks=%d = %d engine requests, which is not below engine.max_running_requests=%d (per replica): when long audio is saturated, short transcriptions queue behind its chunks. Lower one of the two or raise max_running_requests (which also resizes CUDA graph capture).",
-                explicit,
-                chunks,
-                explicit * chunks,
-                max_running,
-            )
-        else:
-            pass
-
-    @property
-    def resolved_audio_chunking(self) -> ResolvedAudioChunking:
-        """The merged long-audio contract: model ClassVars + operator policy."""
-        cls = type(self)
-        policy = self.audio_chunking
-        long_audio_requests = policy.max_concurrent_long_audio_requests
-        if long_audio_requests is None:
-            engine = self.stage_named(self.resolved_entry_stage).engine
-            long_audio_requests = default_max_concurrent_long_audio_requests(
-                engine.max_running_requests if engine is not None else None,
-                policy.max_concurrent_chunks,
-            )
-        else:
-            pass
-        return ResolvedAudioChunking(
-            allow_audio_chunking=cls.allow_audio_chunking,
-            max_audio_clip_s=policy.max_audio_clip_s,
-            max_native_clip_s=cls.max_native_clip_s,
-            max_total_audio_s=policy.max_total_audio_s,
-            min_tail_s=cls.min_tail_s,
-            max_concurrent_chunks=policy.max_concurrent_chunks,
-            max_concurrent_long_audio_requests=long_audio_requests,
-            condition_on_previous_text=cls.condition_on_previous_text,
-        )
 
     @classmethod
     def stage_config_cls(cls, stage_name: str) -> type[StageConfig]:
@@ -908,52 +596,6 @@ class PipelineConfig(BaseModel):
     @property
     def terminal_stages(self) -> list[str]:
         return [s.name for s in self.stages if s.terminal]
-
-    def session_route(self) -> list[str]:
-        """The stage chain a Session of this pipeline follows: `next` from the entry stage to a terminal stage."""
-        route = [self.resolved_entry_stage]
-        while True:
-            following = self.stage_named(route[-1]).next
-            if following is None:
-                return route
-            elif isinstance(following, list) and len(following) == 1:
-                route.append(following[0])
-            elif isinstance(following, str):
-                route.append(following)
-            else:
-                raise ValueError(
-                    f"the stage chain forks at {route[-1]!r} into {following}; "
-                    "a Session of this pipeline needs session_nodes"
-                )
-
-    def session_graph(self) -> SessionGraph | None:
-        """The node graph a Session of this pipeline is, when it is more than one route."""
-        if not self.session_nodes:
-            return None
-        else:
-            pass
-        nodes = {
-            name: SessionNode(
-                stages=tuple(node.stages),
-                inputs=tuple(
-                    entry if isinstance(entry, str) else entry.edge()
-                    for entry in node.inputs
-                    if not isinstance(entry, SessionControlEdgeConfig)
-                ),
-                controls=tuple(
-                    entry.edge()
-                    for entry in node.inputs
-                    if isinstance(entry, SessionControlEdgeConfig)
-                ),
-            )
-            for name, node in self.session_nodes.items()
-        }
-        return SessionGraph(
-            nodes=nodes,
-            publish={
-                name: tuple(formats) for name, formats in self.session_publish.items()
-            },
-        )
 
     @classmethod
     def process_local_edges(cls) -> frozenset[tuple[str, str]]:
@@ -1047,11 +689,6 @@ class PipelineConfig(BaseModel):
         return None
 
     @classmethod
-    def code2wav_stage(cls) -> str | None:
-        """Return the code2wav stage name when the pipeline supports it."""
-        return None
-
-    @classmethod
     def tensor_parallel_server_args_overrides(
         cls, *, stage_name: str, tp_size: int
     ) -> dict[str, object]:
@@ -1070,21 +707,6 @@ class PipelineConfig(BaseModel):
         """Stages whose TP custom all-reduce disable is topology-relaxable."""
         return set()
 
-    def requires_uploaded_voice_for_named_voice(self) -> bool:
-        """Return whether non-default TTS voice names must be uploaded voices."""
-        return False
-
-    def supports_uploaded_voice_references(self) -> bool:
-        """Return whether uploaded voices can be lowered as reference audio."""
-        return False
-
-    def resolve_custom_voice_config(self) -> CustomVoiceConfig | None:
-        return None
-
-    def supports_audio_translation(self) -> bool:
-        """Return whether this pipeline can serve /v1/audio/translations."""
-        return False
-
     @property
     def gpu_placement(self) -> dict[str, int | list[int]]:
         out: dict[str, int | list[int]] = {}
@@ -1098,12 +720,6 @@ class PipelineConfig(BaseModel):
     def validate_general(self) -> None:
         if not self.model_path:
             raise ValueError("Model path is required")
-        else:
-            pass
-        names = [service.name for service in self.services]
-        ports = [service.port for service in self.services]
-        if len(set(names)) != len(names) or len(set(ports)) != len(ports):
-            raise ValueError("services must have distinct names and ports")
         else:
             pass
         for stage in self.stages:
@@ -1125,23 +741,6 @@ class PipelineConfig(BaseModel):
             raise ValueError("Stage names must be unique")
         else:
             pass
-        # The server relays a path to the first stage whose prefix covers it.
-        claimed: list[tuple[str, str]] = []
-        for s in self.stages:
-            for prefix in s.http_routes:
-                for owner, other in claimed:
-                    if owner != s.name and (
-                        f"{prefix}/".startswith(f"{other}/")
-                        or f"{other}/".startswith(f"{prefix}/")
-                    ):
-                        raise ValueError(
-                            f"Stages {owner!r} and {s.name!r} both declare "
-                            f"http_routes over {min(prefix, other, key=len)!r}. "
-                            "Give each path prefix one stage."
-                        )
-                    else:
-                        pass
-                claimed.append((s.name, prefix))
         entry = self.resolved_entry_stage
         if entry not in names:
             raise ValueError(f"entry_stage {entry!r} is not defined")

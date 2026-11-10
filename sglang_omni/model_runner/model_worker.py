@@ -4,12 +4,10 @@ import logging
 import os
 from bisect import bisect_left
 from collections import Counter
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypedDict
 
-from sglang_omni.model_runner.weight_checker import WeightCheckResult
 from sglang_omni.platforms import current_platform
 from sglang_omni.quantization import (
     needs_quant_config_normalization,
@@ -17,7 +15,6 @@ from sglang_omni.quantization import (
     resolve_quant_config,
 )
 from sglang_omni.utils.misc import model_config_has_moe
-from sglang_omni.vendor.sglang.server_args import override_server_args
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -149,39 +146,6 @@ class ModelWorker:
         set_random_seed(self.random_seed)
 
     def init_model_config(self):
-        if self.model_arch_override == "BailingMoeV2ForCausalLM":
-            from sglang_omni.models.ming_omni.registration import (
-                register_ming_hf_config,
-            )
-
-            register_ming_hf_config()
-        else:
-            pass
-        if self.model_arch_override == "MingTTSSGLangModel":
-            from sglang_omni.models.ming_tts.hf_config import (
-                register_ming_tts_hf_config,
-            )
-
-            register_ming_tts_hf_config()
-        else:
-            pass
-        if self.model_arch_override == "MiniCPMO":
-            from sglang_omni.models.minicpm_o.hf_config import (
-                register_minicpm_o_hf_config,
-            )
-
-            register_minicpm_o_hf_config()
-        else:
-            pass
-        if self.model_arch_override == "DotsTTSForConditionalGeneration":
-            from sglang_omni.models.dots_tts.hf_config import (
-                register_dots_tts_hf_config,
-            )
-
-            register_dots_tts_hf_config()
-        else:
-            pass
-
         from sglang.srt.configs.model_config import ModelConfig
 
         self.model_config = ModelConfig.from_server_args(
@@ -461,165 +425,6 @@ class ModelWorker:
                 for bucket, count in sorted(usage.replay_buckets.items())
             },
         }
-
-    def model_info(self) -> dict[str, object]:
-        from sglang.srt.runtime_context import get_model, get_parallel, get_serving
-
-        return {
-            "model_path": get_model().model_path,
-            "load_format": get_model().load_format,
-            "weight_version": get_serving().weight_version,
-            "tp_rank": self.tp_rank,
-            "tp_size": get_parallel().tp_size,
-            "model_arch_override": self.model_arch_override,
-            "supports_weight_update": True,
-            "supports_weight_checker": True,
-            "prefill_cuda_graph": self.prefill_cuda_graph_info(),
-        }
-
-    def update_weights_from_disk(
-        self, payload: Mapping[str, object]
-    ) -> tuple[bool, str]:
-        model_path = payload.get("model_path")
-        if not model_path:
-            return False, "model_path is required"
-        else:
-            pass
-        from sglang.srt.runtime_context import get_model
-
-        update = self.model_runner.update_weights_from_disk
-        load_format = payload.get("load_format") or get_model().load_format
-        success, message = update(
-            model_path,
-            load_format,
-            recapture_cuda_graph=bool(payload.get("recapture_cuda_graph", False)),
-        )
-        # The runner's WeightUpdater already records model_path and
-        # load_format in the model bag; weight_version is omni's own field.
-        weight_version = payload.get("weight_version")
-        if success and weight_version is not None:
-            override_server_args(
-                self.server_args,
-                "sglang-omni-weight-update-disk",
-                weight_version=weight_version,
-            )
-        else:
-            pass
-        return bool(success), str(message)
-
-    def update_weights_from_tensor(
-        self, payload: dict[str, object]
-    ) -> tuple[bool, str]:
-        if payload.get("serialized_named_tensors") is not None:
-            return (
-                False,
-                "update_weights_from_tensor requires a tensor data plane; "
-                "Omni admin control plane only carries metadata",
-            )
-        else:
-            pass
-        return self.call_optional_weight_method("update_weights_from_tensor", payload)
-
-    def init_weights_update_group(
-        self, payload: Mapping[str, object]
-    ) -> tuple[bool, str]:
-        init = self.model_runner.init_weights_update_group
-        master_address = payload.get("master_address")
-        master_port = payload.get("master_port")
-        world_size = payload.get("world_size")
-        if not master_address or master_port is None or world_size is None:
-            return False, "master_address, master_port and world_size are required"
-        else:
-            pass
-        try:
-            master_port_int = int(master_port)
-            rank_offset_int = int(payload.get("rank_offset", 0))
-            world_size_int = int(world_size)
-        except (TypeError, ValueError):
-            return False, "master_port, rank_offset and world_size must be integers"
-        success, message = init(
-            master_address,
-            master_port_int,
-            rank_offset_int,
-            world_size_int,
-            payload.get("group_name") or "weight_update_group",
-            backend=payload.get("backend") or "nccl",
-        )
-        return bool(success), str(message)
-
-    def destroy_weights_update_group(
-        self, payload: Mapping[str, object]
-    ) -> tuple[bool, str]:
-        destroy = self.model_runner.destroy_weights_update_group
-        success, message = destroy(payload.get("group_name") or "weight_update_group")
-        return bool(success), str(message)
-
-    def update_weights_from_distributed(
-        self, payload: Mapping[str, object]
-    ) -> tuple[bool, str]:
-        update = self.model_runner.update_weights_from_distributed
-        names = payload.get("names")
-        dtypes = payload.get("dtypes")
-        shapes = payload.get("shapes")
-        if names is None or dtypes is None or shapes is None:
-            return False, "names, dtypes and shapes are required"
-        else:
-            pass
-        # Pydantic already guards type/None at the HTTP boundary; this length
-        # check is the one guard that matters — sglang zips names/dtypes/shapes
-        # and silently truncates to the shortest, under-broadcasting weights.
-        name_count = len(names)
-        dtype_count = len(dtypes)
-        shape_count = len(shapes)
-        if name_count == 0 or dtype_count == 0 or shape_count == 0:
-            return False, "names, dtypes and shapes must be non-empty"
-        else:
-            pass
-        if name_count != dtype_count or name_count != shape_count:
-            return False, "names, dtypes and shapes must have the same length"
-        else:
-            pass
-        success, message = update(
-            names,
-            dtypes,
-            shapes,
-            payload.get("group_name") or "weight_update_group",
-            load_format=payload.get("load_format"),
-        )
-        if success:
-            weight_version = payload.get("weight_version")
-            if weight_version is not None:
-                override_server_args(
-                    self.server_args,
-                    "sglang-omni-weight-update-distributed",
-                    weight_version=weight_version,
-                )
-            else:
-                pass
-        else:
-            pass
-        return bool(success), str(message)
-
-    def weights_checker(self, action: str) -> WeightCheckResult:
-        checker = getattr(self, "strict_weight_checker", None)
-        if checker is None:
-            from sglang_omni.model_runner.weight_checker import StrictWeightChecker
-
-            checker = StrictWeightChecker(self.model_runner)
-            self.strict_weight_checker = checker
-        else:
-            pass
-        return checker.run(action)
-
-    def call_optional_weight_method(
-        self,
-        method_name: str,
-        payload: dict[str, object],
-    ) -> tuple[bool, str]:
-        method = getattr(self.model_runner, method_name)
-        recv_req = SimpleNamespace(**payload)
-        success, message = method(recv_req)
-        return bool(success), str(message)
 
 
 def resolve_nccl_port() -> int:

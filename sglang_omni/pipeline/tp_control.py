@@ -18,8 +18,6 @@ from multiprocessing.queues import Queue
 
 from sglang_omni.proto.messages import (
     AbortMessage,
-    AdminMessage,
-    AdminResultMessage,
     FreezeGCMessage,
     ProfilerStartMessage,
     ProfilerStopMessage,
@@ -32,11 +30,7 @@ logger = logging.getLogger(__name__)
 _WORK_POLL_SECONDS = 0.1
 
 TPControlMessage = (
-    ShutdownMessage
-    | FreezeGCMessage
-    | ProfilerStartMessage
-    | ProfilerStopMessage
-    | AdminMessage
+    ShutdownMessage | FreezeGCMessage | ProfilerStartMessage | ProfilerStopMessage
 )
 
 
@@ -60,12 +54,10 @@ class TPLeaderFanout:
         *,
         follower_work_queues: list[Queue[TPWorkQueueMessage]],
         follower_abort_queues: list[Queue[AbortMessage]],
-        follower_admin_result_queues: list[Queue[AdminResultMessage]] | None = None,
     ) -> None:
         self.stage_name = stage_name
         self.follower_work_queues = list(follower_work_queues)
         self.follower_abort_queues = list(follower_abort_queues)
-        self.follower_admin_result_queues = list(follower_admin_result_queues or [])
 
     async def fanout_control(
         self,
@@ -83,49 +75,9 @@ class TPLeaderFanout:
         for q in self.follower_abort_queues:
             q.put_nowait(msg)
 
-    async def collect_admin_results(
-        self,
-        op_id: str,
-        *,
-        timeout_s: float = 60.0,
-    ) -> list[AdminResultMessage]:
-        """Collect one admin result from every TP follower."""
-        if not self.follower_admin_result_queues:
-            return []
-        else:
-            pass
-
-        loop = asyncio.get_running_loop()
-        tasks = [
-            loop.run_in_executor(
-                None,
-                lambda q=q: q.get(timeout=timeout_s),
-            )
-            for q in self.follower_admin_result_queues
-        ]
-        raw_results = await asyncio.gather(*tasks)
-        results: list[AdminResultMessage] = []
-        for msg in raw_results:
-            if not isinstance(msg, AdminResultMessage):
-                raise ValueError(
-                    f"Unexpected TP follower admin result: {type(msg).__name__}"
-                )
-            else:
-                pass
-            if msg.result.op_id != op_id:
-                raise ValueError(
-                    "Unexpected TP follower admin op id: "
-                    f"{msg.result.op_id} != {op_id}"
-                )
-            else:
-                pass
-            results.append(msg)
-        return results
-
     def close(self) -> None:
         self.follower_work_queues.clear()
         self.follower_abort_queues.clear()
-        self.follower_admin_result_queues.clear()
 
 
 class TPFollowerControlPlane:
@@ -138,13 +90,11 @@ class TPFollowerControlPlane:
         recv_endpoint: str = "",
         work_queue: Queue[TPWorkQueueMessage],
         abort_queue: Queue[AbortMessage],
-        admin_result_queue: Queue[AdminResultMessage] | None = None,
     ) -> None:
         self.stage_name = stage_name
         self.recv_endpoint = recv_endpoint
         self.work_queue = work_queue
         self.abort_queue = abort_queue
-        self.admin_result_queue = admin_result_queue
         self.closed = False
 
     async def start(self) -> None:
@@ -153,8 +103,7 @@ class TPFollowerControlPlane:
     async def recv(
         self,
     ) -> (
-        AdminMessage
-        | ShutdownMessage
+        ShutdownMessage
         | FreezeGCMessage
         | ProfilerStartMessage
         | ProfilerStopMessage
@@ -164,7 +113,6 @@ class TPFollowerControlPlane:
         if isinstance(
             msg,
             (
-                AdminMessage,
                 ShutdownMessage,
                 FreezeGCMessage,
                 ProfilerStartMessage,
@@ -184,15 +132,6 @@ class TPFollowerControlPlane:
         else:
             pass
         raise ValueError(f"Unexpected TP follower abort message: {type(msg)}")
-
-    async def send_admin_result(self, msg: AdminResultMessage) -> None:
-        if self.admin_result_queue is None:
-            raise RuntimeError(
-                f"TP follower stage {self.stage_name} has no admin result queue"
-            )
-        else:
-            pass
-        self.admin_result_queue.put_nowait(msg)
 
     async def recv_from_queue(
         self, q: Queue[TPWorkQueueMessage] | Queue[AbortMessage]

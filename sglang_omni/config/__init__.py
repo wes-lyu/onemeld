@@ -10,9 +10,7 @@ from sglang_omni.config.placement import (
 )
 from sglang_omni.config.runtime import resolve_stage_factory_args
 from sglang_omni.config.schema import (
-    AudioChunkingConfig,
     CommConfig,
-    CustomVoiceConfig,
     EndpointsConfig,
     EngineArgs,
     EngineStageConfig,
@@ -20,8 +18,6 @@ from sglang_omni.config.schema import (
     PipelineConfig,
     PlacementConfig,
     ProcessConfig,
-    RealtimeTranscriptionConfig,
-    ResolvedAudioChunking,
     StageConfig,
 )
 from sglang_omni.config.topology import (
@@ -51,13 +47,9 @@ __all__ = [
     "ProcessGroupPlacement",
     "ProcessTopologyPlan",
     "build_process_topology_plan",
-    "AudioChunkingConfig",
-    "ResolvedAudioChunking",
-    "CustomVoiceConfig",
     "compile_logical_processes",
     "PipelineConfig",
     "ProcessConfig",
-    "RealtimeTranscriptionConfig",
     "StageConfig",
     "EngineStageConfig",
     "EngineArgs",

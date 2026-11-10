@@ -3,11 +3,11 @@
 
 import base64
 import io
+import wave
 
 import pytest
 from PIL import Image
 
-from sglang_omni.client.audio import encode_wav
 from sglang_omni.client.image_media import InlineImage
 from sglang_omni.pipeline.umm import UMMController
 from sglang_omni.pipeline.umm_plan import UMMCapability, UMMCompositionSpec
@@ -25,29 +25,16 @@ def composition() -> UMMCompositionSpec:
         capabilities={
             "paint": UMMCapability(
                 stages=["image_a", "image_b"],
-                protocol="native_image",
+                protocol="image_base64",
                 description="Create one image",
                 input_kinds=["text"],
                 parameters={"width": 512, "height": 512, "num_inference_steps": 20},
-            ),
-            "retouch": UMMCapability(
-                stages=["editor"],
-                protocol="native_image",
-                description="Edit one image",
-                input_kinds=["text", "image"],
-            ),
-            "animate": UMMCapability(
-                stages=["video_worker"],
-                protocol="native_video",
-                description="Animate one image",
-                input_kinds=["text", "image"],
-                parameters={"num_frames": 33},
             ),
             "inspect": UMMCapability(
                 stages=["vision_worker"],
                 protocol="native_chat",
                 description="Answer questions or inspect media",
-                input_kinds=["text", "image", "video", "audio"],
+                input_kinds=["text", "image"],
             ),
             "transcribe": UMMCapability(
                 stages=["asr_worker"],
@@ -55,16 +42,7 @@ def composition() -> UMMCompositionSpec:
                 description="Transcribe speech",
                 input_kinds=["audio"],
             ),
-            "speak": UMMCapability(
-                stages=["speech_worker"],
-                protocol="tts",
-                description="Read text aloud",
-                input_kinds=["text"],
-                speech={"voice": "Vivian"},
-            ),
         },
-        allowed_modes=["plan", "iterative"],
-        max_planner_turns=3,
         max_steps=8,
     )
 
@@ -88,4 +66,8 @@ def inline_images() -> list[InlineImage]:
 
 @pytest.fixture
 def speech_wav() -> bytes:
-    return encode_wav(sine_waveform(1600), SAMPLE_RATE)
+    with io.BytesIO() as buffer:
+        with wave.open(buffer, "wb") as recording:
+            recording.setparams((1, 2, SAMPLE_RATE, 0, "NONE", "not compressed"))
+            recording.writeframes((sine_waveform(1600) * 32767).astype("<i2").tobytes())
+        return buffer.getvalue()

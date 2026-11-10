@@ -78,8 +78,4 @@ def create_sglang_qwen3_asr_executor(
     )
 
 
-def create_qwen3_asr_executor(*args, **kwargs):
-    return create_sglang_qwen3_asr_executor(*args, **kwargs)
-
-
-__all__ = ["create_sglang_qwen3_asr_executor", "create_qwen3_asr_executor"]
+__all__ = ["create_sglang_qwen3_asr_executor"]

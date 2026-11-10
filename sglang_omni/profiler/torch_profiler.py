@@ -44,6 +44,7 @@ class TorchProfiler(ProfilerBase):
         Start the profiler with the given trace path template.
         """
         with cls.lock:
+            rank = cls.get_rank()
             if cls.profiler is not None:
                 if run_id is not None and cls.active_run_id == run_id:
                     return f"{cls.trace_template}_rank{rank}.trace.json.gz"
@@ -66,7 +67,6 @@ class TorchProfiler(ProfilerBase):
                 cls.trace_template = ""
             else:
                 pass
-            rank = cls.get_rank()
             trace_path_template = os.path.abspath(trace_path_template)
             cls.trace_template = trace_path_template
             cls.active_run_id = run_id

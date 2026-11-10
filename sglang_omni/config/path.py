@@ -11,7 +11,7 @@ against a dict. That buys three things a dict walker cannot offer:
 * every path knows whether it is part of the public surface, so derived
   values such as ``config_cls`` can be refused up front.
 
-Stages are addressed **by name** (``stages.thinker.factory.max_seq_len``) and
+Stages are addressed **by name** (``stages.understanding.factory.max_seq_len``) and
 compile against their *own* stage type: the root config class declares a
 ``StageConfig`` subclass per stage name, so a model-specific ``factory.*``
 field exists only on the stage that declares it, and ``engine.*`` exists
@@ -53,7 +53,7 @@ class SegmentKind(str, Enum):
     """A declared field of a pydantic model."""
 
     NAMED_ITEM = "named_item"
-    """An element of a name-keyed collection, e.g. ``stages.thinker``."""
+    """An element of a name-keyed collection, e.g. ``stages.understanding``."""
 
     MAPPING_KEY = "mapping_key"
     """A key of a typed mapping, e.g. ``env.CUDA_VISIBLE_DEVICES``."""
@@ -573,7 +573,7 @@ def descend(container: object, part: str, *, raw: str, prefix: str) -> Segment:
         if part.isdigit():
             raise ConfigPathError(
                 f"{join_prefix(prefix)} is addressed by name, not by index; "
-                f"use e.g. {join_prefix(prefix)}.thinker instead of {part!r}",
+                f"use e.g. {join_prefix(prefix)}.understanding instead of {part!r}",
                 raw=raw,
                 resolved_prefix=prefix,
             )

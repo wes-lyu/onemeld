@@ -1641,14 +1641,14 @@ class OmniScheduler(Generic[RequestDataT]):
             mem_hint = " Try raising engine.kv_cache_bytes."
         elif mem_fraction is not None:
             mem_hint = (
-                f" Current mem_fraction_static is {mem_fraction:.3f}; try setting "
-                "--thinker-mem-fraction-static higher."
+                f" Current mem_fraction_static is {mem_fraction:.3f}; try raising "
+                "engine.mem_fraction_static."
             )
         else:
-            mem_hint = " Try setting a higher --thinker-mem-fraction-static value."
+            mem_hint = " Try raising engine.mem_fraction_static."
 
         return (
-            "Request requires more tokens than the thinker KV cache can hold "
+            "Request requires more tokens than the KV cache can hold "
             f"(input_tokens={input_len}, max_new_tokens={max_new_tokens}, "
             f"required_tokens={required_tokens}, kv_capacity={kv_capacity})."
             f"{mem_hint}"
@@ -1871,9 +1871,7 @@ class OmniScheduler(Generic[RequestDataT]):
     def _run_batch(self, batch, pp_proxy_tensors=None):
         """Run a batch through the model runner.
 
-        The custom model runner (for example ThinkerModelRunner or a
-        model-specific talker runner)
-        accepts a ``SchedulerOutput`` wrapper and returns a
+        The custom model runner accepts a ``SchedulerOutput`` wrapper and returns a
         ``ModelRunnerOutput``.  The upstream ``process_batch_result`` expects
         a ``GenerationBatchResult``.  We bridge the two formats here.
         """
@@ -2590,7 +2588,7 @@ class OmniScheduler(Generic[RequestDataT]):
         # Model runners read Req.inflight_middle_chunks at forward time under
         # a same-iteration process_batch_result contract. On this loop the
         # decrement lags one iteration, so a final prefill chunk still reads
-        # as a middle chunk at forward time and the TTS model runners emit
+        # as a middle chunk at forward time and the model runners emit
         # wrong chunk boundaries — silently. No construction site enables
         # overlap today; refuse to run rather than corrupt chunked prefill if
         # one ever does.

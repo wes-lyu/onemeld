@@ -284,7 +284,7 @@ def should_disable_custom_all_reduce_for_gpus(
     logical_gpu_ids: Sequence[int] | None,
     env: Mapping[str, str] | None = None,
 ) -> bool:
-    """Whether to disable SGLang custom all-reduce for a TP thinker.
+    """Whether to disable SGLang custom all-reduce for a TP stage.
 
     Custom all-reduce requires a direct P2P mesh between the tensor-parallel GPUs;
     on topologies without it (or that can't be confirmed) it must fall back to

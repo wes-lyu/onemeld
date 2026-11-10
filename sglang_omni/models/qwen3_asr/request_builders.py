@@ -598,8 +598,6 @@ def make_qwen3_asr_stream_output_builder(
         last_emit_attr="_qwen3_asr_stream_last_emit_t",
         eos_token_id=resolved_eos,
         min_emit_interval_s=min_emit_interval_s,
-        allow_terminal_flush=True,
-        emit_trailing_replacement_on_terminal=True,
     )
 
     def _build_stream_output(

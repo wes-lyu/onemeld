@@ -416,7 +416,7 @@ def render_missing_fraction_stages(
     """Name the stages an operator must edit, not just the expanded instances.
 
     Note (kaige): fractions are declared on the logical stage in YAML, so an
-    error that only names talker_ar@r0 does not point at anything editable.
+    error that only names understanding@r0 does not point at anything editable.
     """
     instance_to_logical = {
         instance: logical

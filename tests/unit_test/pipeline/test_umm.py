@@ -184,7 +184,7 @@ class SharedContextAdapter(Recorder):
 
 
 class ParallelAdapter(Recorder):
-    """LLaDA2-Uni: an image decodes while the model keeps writing."""
+    """Parallel dispatch: an image decodes while the model keeps writing."""
 
     def start(self, context):
         return UMMStep(

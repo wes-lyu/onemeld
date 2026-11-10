@@ -313,8 +313,8 @@ class StageConfig(BaseModel):
             name="aggregate",
             factory_path="...create_aggregate",
             wait_for=["preprocessor", "image_enc", "audio_enc"],
-            merge_fn="...merge_for_thinker",
-            next="thinker",
+            merge_fn="...merge_for_understanding",
+            next="understanding",
         )
     """
 

@@ -17,7 +17,6 @@ from typing import Any, Callable
 
 import torch
 
-from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 
@@ -228,7 +227,7 @@ def runtime_factory(
     *,
     model_path: str,
     gpu_id: int,
-    thinker_max_seq_len: int | None = None,
+    max_seq_len: int | None = None,
     video_fps: float | None = None,
     server_args_overrides: dict[str, Any] | None = None,
     encoder_mem_reserve: float | None = None,
@@ -237,7 +236,7 @@ def runtime_factory(
     return {
         "model_path": model_path,
         "gpu_id": gpu_id,
-        "thinker_max_seq_len": thinker_max_seq_len,
+        "max_seq_len": max_seq_len,
         "video_fps": video_fps,
         "server_args_overrides": server_args_overrides,
         "encoder_mem_reserve": encoder_mem_reserve,
@@ -388,7 +387,7 @@ def identity_route(request_id: str, output: Any) -> str:
 
 def identity_stream_targets(request_id: str, output: Any) -> list[str]:
     del request_id, output
-    return ["talker"]
+    return ["generation"]
 
 
 def identity_wait_sources(
@@ -397,7 +396,7 @@ def identity_wait_sources(
     payload: StagePayload,
 ) -> list[str]:
     del request_id, from_stage, payload
-    return ["preprocess", "thinker"]
+    return ["preprocess", "understanding"]
 
 
 def tuple_wait_sources(
@@ -406,7 +405,7 @@ def tuple_wait_sources(
     payload: StagePayload,
 ) -> tuple[str, str]:
     del request_id, from_stage, payload
-    return ("preprocess", "thinker")
+    return ("preprocess", "understanding")
 
 
 def wait_sources_to_undeclared_stage(
@@ -418,14 +417,14 @@ def wait_sources_to_undeclared_stage(
     return ["preprocess", "missing"]
 
 
-def route_to_undeclared_talker(request_id: str, output: Any) -> str:
+def route_to_undeclared_generation(request_id: str, output: Any) -> str:
     del request_id, output
-    return "talker"
+    return "generation"
 
 
-def stream_done_to_undeclared_talker(request_id: str, output: Any) -> list[str]:
+def stream_done_to_undeclared_generation(request_id: str, output: Any) -> list[str]:
     del request_id, output
-    return ["talker"]
+    return ["generation"]
 
 
 def merge_payloads(payloads: dict[str, StagePayload]) -> StagePayload:
@@ -521,13 +520,6 @@ def make_stream_message(
 
 def fake_factory_path(name: str) -> str:
     return f"tests.unit_test.fixtures.pipeline_fakes.{name}"
-
-
-class RejectThinkerPlacementPolicy:
-    def validate(self, config: PipelineConfig, plan) -> None:
-        del config
-        if "thinker" in plan.stages:
-            raise ValueError("policy rejected thinker")
 
 
 def tensor_equal(left: Any, right: Any) -> bool:

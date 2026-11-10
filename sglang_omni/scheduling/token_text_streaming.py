@@ -30,8 +30,6 @@ def make_token_text_stream_output_builder(
     last_emit_attr: str,
     eos_token_id: int | None,
     min_emit_interval_s: float = 0.0,
-    allow_terminal_flush: bool = False,
-    emit_trailing_replacement_on_terminal: bool = False,
 ) -> Callable[
     [str, SGLangARRequestData, RequestOutput | SimpleNamespace], list[OutgoingMessage]
 ]:
@@ -62,10 +60,9 @@ def make_token_text_stream_output_builder(
         else:
             pass
 
-        # note (guozhihao): Fun sets allow_terminal_flush so empty data can flush
-        # when finished(); MOSS leaves it False and empty data stays silent.
+        # note (guozhihao): empty data still flushes the pending tail once finished().
         token_data = req_output.data
-        is_terminal = bool(req.finished()) if allow_terminal_flush else False
+        is_terminal = bool(req.finished())
         token_id: int | None = None
         if token_data is not None:
             try:
@@ -116,11 +113,8 @@ def make_token_text_stream_output_builder(
             pass
 
         delta = decode_fn(pending)
-        # note (guozhihao): trailing U+FFFD hold is independent of terminal flush so a
-        # follow-up can enable MOSS flush without also emitting incomplete UTF-8.
-        if delta.endswith("\ufffd") and not (
-            is_terminal and emit_trailing_replacement_on_terminal
-        ):
+        # note (guozhihao): hold a trailing U+FFFD until more bytes arrive or the request ends.
+        if delta.endswith("\ufffd") and not is_terminal:
             return []
         else:
             pass
@@ -142,20 +136,16 @@ def make_token_text_stream_output_builder(
             )
         ]
 
-    if allow_terminal_flush:
+    def _flush_stream_output(
+        request_id: str, req_data: SGLangARRequestData
+    ) -> list[OutgoingMessage]:
+        return _build_stream_output(
+            request_id,
+            req_data,
+            SimpleNamespace(data=None),
+        )
 
-        def _flush_stream_output(
-            request_id: str, req_data: SGLangARRequestData
-        ) -> list[OutgoingMessage]:
-            return _build_stream_output(
-                request_id,
-                req_data,
-                SimpleNamespace(data=None),
-            )
-
-        _build_stream_output.flush = _flush_stream_output  # type: ignore[attr-defined]
-    else:
-        pass
+    _build_stream_output.flush = _flush_stream_output  # type: ignore[attr-defined]
 
     return _build_stream_output
 

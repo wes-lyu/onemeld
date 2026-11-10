@@ -76,7 +76,7 @@ _REMOVED_TOP_LEVEL_BLOCKS: dict[str, str] = {
 _STAGES_LIST_GUIDANCE = (
     "stages must be a mapping keyed by stage name; the list form is no "
     "longer accepted. Move each entry under its name and drop the name: "
-    "key:\n\n    stages:\n      thinker:\n        tp_size: 2"
+    "key:\n\n    stages:\n      understanding:\n        tp_size: 2"
 )
 
 

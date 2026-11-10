@@ -17,10 +17,10 @@ classification from the same audited policy and fail closed on any mismatch.
 
 Ordering contract, enforced by the caller and verified here:
 
-- The leader exports at the end of load_model. Builder-level hooks (e.g. Higgs
-  truncate_rope_to_bf16) run later and mutate the already-shared storage, so
-  they must stay in-place, idempotent, and deterministic: a follower's
-  redundant application must write identical bytes.
+- The leader exports at the end of load_model. Builder-level hooks that run
+  later mutate the already-shared storage, so they must stay in-place,
+  idempotent, and deterministic: a follower's redundant application must
+  write identical bytes.
 - Followers attach before KV-pool profiling, warmup, and graph capture.
   verify_attachment re-checks storage identity right before capture, so a
   silently re-initialized tensor fails loudly instead of serving dummy weights.
@@ -257,8 +257,8 @@ class SglangIpcSerializer:
 def named_shared_tensors(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     """All named parameters and buffers, deduplicated, name-collision checked.
 
-    Deduplication folds tied parameters (e.g. Higgs modality_head.weight tied
-    to the embedding) into one canonical name on both sides, so assigning .data
+    Deduplication folds tied parameters (e.g. an output head tied to the
+    embedding) into one canonical name on both sides, so assigning .data
     through that single Parameter object updates every module holding it.
     """
     tensors: dict[str, torch.Tensor] = {}
@@ -313,70 +313,19 @@ class WeightSharePolicy:
 
 # Note (Jiaxin Deng): the gate derives from these keys. An entry here requires
 # a full post-load mutation audit (any registered tensor written per request
-# listed private) AND a passing end-to-end run on the mps_dp launcher at the
-# current revision: shared N=2 boot under MPS, attach verification, concurrent
-# request correctness, and clean teardown. Audit alone is not enough; those
-# entries live in AUDIT_ONLY_WEIGHT_SHARE_POLICIES below.
+# listed private) AND a passing end-to-end run with co-located replicas at the
+# current revision: shared N=2 boot, attach verification, concurrent request
+# correctness, and clean teardown.
 WEIGHT_SHARE_POLICIES: dict[str, WeightSharePolicy] = {
-    "HiggsMultimodalQwen3ForConditionalGeneration": WeightSharePolicy(),
-    # Note (Jiaxin Deng): MOSS local stages per-request decode feedback into
-    # this registered embedding every step; everything else is load-once.
-    "MossTTSLocalSGLangModel": WeightSharePolicy(
-        private_tensor_names=frozenset({"decode_input_embedding.weight"})
-    ),
-    # Note (Jiaxin Deng): MOSS delay stages decode feedback the same way MOSS
-    # local does; its other registered tensors are load or init once.
-    "MossTTSDelaySGLangModel": WeightSharePolicy(
-        private_tensor_names=frozenset({"decode_input_embedding.weight"})
-    ),
-    # Note (Jiaxin Deng): the four ASR models carry no decode staging scratch;
+    # Note (Jiaxin Deng): the ASR model carries no decode staging scratch;
     # every registered tensor is checkpoint-loaded or an init-computed constant.
-    "MossTranscribeDiarizeForConditionalGeneration": WeightSharePolicy(),
     "Qwen3ASRForConditionalGeneration": WeightSharePolicy(),
-    "WhisperForConditionalGeneration": WeightSharePolicy(),
-    "FunAsrNanoForConditionalGeneration": WeightSharePolicy(),
 }
 
-# Note (Jiaxin Deng): completed mutation audits whose launcher end-to-end
-# validation has not passed yet; the gate rejects them so an audit cannot be
-# advertised as support. Promotion to WEIGHT_SHARE_POLICIES requires the same
-# e2e evidence as the entries above. The Ming-Omni thinker stays out entirely
-# until audited.
-AUDIT_ONLY_WEIGHT_SHARE_POLICIES: dict[str, WeightSharePolicy] = {
-    # Note (Jiaxin Deng): Ming stages decode feedback like MOSS local; blocked
-    # on VRAM (leader alone reaches the card edge on 80 GB).
-    "MingTTSSGLangModel": WeightSharePolicy(
-        private_tensor_names=frozenset({"decode_input_embedding.weight"})
-    ),
-    # Note (Jiaxin Deng): Voxtral keeps its decode staging in an unregistered
-    # plain tensor; if that scratch is ever registered, this needs its name.
-    "VoxtralSGLangTTSModel": WeightSharePolicy(),
-    # Note (Jiaxin Deng): Fish's staging is unregistered and its fast-AR
-    # decoder, with per-step KV buffers, joins the module tree only after
-    # export; the empty set holds only while export stays at load_model's end.
-    "S2ProSGLangTextModel": WeightSharePolicy(),
-    # Note (Jiaxin Deng): LLaDA2's denoise-loop state lives in per-replica
-    # scheduler and pool state, never in registered tensors; its pipeline also
-    # declares no generation SGLang stage, so the launcher cannot drive it.
-    "LLaDA2MoeModelLM": WeightSharePolicy(),
-    # Note (Jiaxin Deng): Qwen3-TTS stages decode feedback into this
-    # dual-registered embedding, listed under its deduped canonical name; the
-    # external speech tokenizer never enters the module tree.
-    "Qwen3TTSTalker": WeightSharePolicy(
-        private_tensor_names=frozenset({"model.decode_feedback_embedding.weight"})
-    ),
-    # Note (Jiaxin Deng): Qwen3-Omni runs two engines per pipeline; the
-    # launcher only drives single-SGLang-engine pipelines, so these cannot
-    # reach e2e validation on it. The talker keeps its decode staging in
-    # unregistered plain attributes.
-    "Qwen3OmniThinkerForCausalLM": WeightSharePolicy(),
-    "Qwen3OmniTalker": WeightSharePolicy(),
-}
-
-# Note (Jiaxin Deng): the ASR entries assume the pinned sglang's rope caches
+# Note (Jiaxin Deng): the ASR entry assumes the pinned sglang's rope caches
 # stay bound after load; a bump that rebinds one at serving time (2-D mrope
-# positions, spec decode) would silently orphan followers, so re-audit the
-# rope stack when bumping sglang.
+# positions) would silently orphan followers, so re-audit the rope stack when
+# bumping sglang.
 
 SUPPORTED_WEIGHT_SHARE_ARCHITECTURES = frozenset(WEIGHT_SHARE_POLICIES)
 
@@ -398,14 +347,6 @@ def validate_weight_share_architecture(architectures: object) -> WeightSharePoli
     policy = WEIGHT_SHARE_POLICIES.get(arch)
     if policy is None:
         supported = ", ".join(sorted(WEIGHT_SHARE_POLICIES))
-        if arch in AUDIT_ONLY_WEIGHT_SHARE_POLICIES:
-            raise WeightShareError(
-                f"weight sharing for architecture {arch!r} has a completed "
-                "mutation audit but no passing launcher end-to-end validation; "
-                f"support is in progress. Supported architectures: {supported}"
-            )
-        else:
-            pass
         raise WeightShareError(
             f"weight sharing is unsupported for architecture {arch!r}; "
             f"supported architectures: {supported}. A model that writes "

@@ -255,11 +255,14 @@ def test_stage_routes_results_streams_and_clears_abort_state(monkeypatch) -> Non
         scheduler = FakeScheduler()
         control_plane = RecordingStageControlPlane()
         stage_obj = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: "decode",
-            endpoints={"decode": "inproc://decode", "talker": "inproc://talker"},
+            endpoints={
+                "decode": "inproc://decode",
+                "generation": "inproc://generation",
+            },
             project_payload={"decode": make_noop_projector("decode-only")},
-            stream_targets=["talker"],
+            stream_targets=["generation"],
             relay=relay,
             scheduler=scheduler,
             control_plane=control_plane,
@@ -281,7 +284,7 @@ def test_stage_routes_results_streams_and_clears_abort_state(monkeypatch) -> Non
         stream_msg = next(
             msg
             for target, _, msg in control_plane.sent_to_stage
-            if target == "talker" and msg.chunk_id == 0
+            if target == "generation" and msg.chunk_id == 0
         )
         assert stream_msg.chunk_id == 0
 
@@ -299,18 +302,18 @@ def test_stage_routes_results_streams_and_clears_abort_state(monkeypatch) -> Non
 
 def test_stage_process_rejects_dynamic_targets_outside_static_topology() -> None:
     spec = StageLaunchConfig(
-        stage_name="thinker",
+        stage_name="understanding",
         factory=fake_factory_path("make_scheduler"),
         next_stages=["decode"],
-        route_fn=fake_factory_path("route_to_undeclared_talker"),
+        route_fn=fake_factory_path("route_to_undeclared_generation"),
         stream_targets=["decode"],
-        stream_done_to_fn=fake_factory_path("stream_done_to_undeclared_talker"),
-        recv_endpoint="inproc://thinker",
+        stream_done_to_fn=fake_factory_path("stream_done_to_undeclared_generation"),
+        recv_endpoint="inproc://understanding",
         coordinator_endpoint="inproc://coordinator",
         abort_endpoint="inproc://abort",
         stage_endpoints={
             "decode": "inproc://decode",
-            "talker": "inproc://talker",
+            "generation": "inproc://generation",
         },
         comm_config={"slot_size_mb": 1},
     )
@@ -331,7 +334,7 @@ def test_stage_process_rejects_dynamic_wait_sources_outside_static_fanin() -> No
         stage_name="aggregate",
         factory=fake_factory_path("make_scheduler"),
         next_stages="decode",
-        wait_for=["preprocess", "thinker"],
+        wait_for=["preprocess", "understanding"],
         wait_for_fn=fake_factory_path("wait_sources_to_undeclared_stage"),
         merge_fn=fake_factory_path("merge_payloads"),
         recv_endpoint="inproc://aggregate",
@@ -351,7 +354,7 @@ def test_stage_process_accepts_iterable_dynamic_wait_sources() -> None:
         stage_name="aggregate",
         factory=fake_factory_path("make_scheduler"),
         next_stages="decode",
-        wait_for=["preprocess", "thinker"],
+        wait_for=["preprocess", "understanding"],
         wait_for_fn=fake_factory_path("tuple_wait_sources"),
         merge_fn=fake_factory_path("merge_payloads"),
         recv_endpoint="inproc://aggregate",
@@ -366,10 +369,12 @@ def test_stage_process_accepts_iterable_dynamic_wait_sources() -> None:
         stage_obj.input_handler.receive("req-1", "preprocess", make_stage_payload())
         is None
     )
-    merged = stage_obj.input_handler.receive("req-1", "thinker", make_stage_payload())
+    merged = stage_obj.input_handler.receive(
+        "req-1", "understanding", make_stage_payload()
+    )
 
     assert merged is not None
-    assert merged.data["merged_sources"] == ["preprocess", "thinker"]
+    assert merged.data["merged_sources"] == ["preprocess", "understanding"]
 
 
 def test_stage_run_raises_when_scheduler_thread_crashes() -> None:
@@ -785,19 +790,19 @@ def test_relay_payload_and_cross_gpu_stream_contracts() -> None:
             stream_relay,
             request_id="req-1",
             data=torch.tensor([1, 2, 3]),
-            target_stage="talker",
-            from_stage="thinker",
+            target_stage="generation",
+            from_stage="understanding",
             chunk_id=0,
             metadata={"token_id": 1, "hidden": torch.tensor([4])},
             transport=TransportKind.SHM,
         )
         await control_plane.send_to_stage(
-            "talker",
-            "inproc://talker",
+            "generation",
+            "inproc://generation",
             DataReadyMessage(
                 request_id="req-1",
-                from_stage="thinker",
-                to_stage="talker",
+                from_stage="understanding",
+                to_stage="generation",
                 data_ref=stream_ref.to_dict(),
                 chunk_id=0,
             ),
@@ -839,8 +844,8 @@ def test_payload_header_round_trips_binary_control_plane(
             pass
         message = DataReadyMessage(
             request_id=payload.request_id,
-            from_stage="thinker",
-            to_stage="talker",
+            from_stage="understanding",
+            to_stage="generation",
             data_ref=serialized,
         )
         received = deserialize_message(serialize_message(message))
@@ -942,9 +947,12 @@ def test_stage_uses_dynamic_route_and_stream_done_targets() -> None:
         control_plane = RecordingStageControlPlane()
         stage_obj = make_stage(
             control_plane=control_plane,
-            endpoints={"decode": "inproc://decode", "talker": "inproc://talker"},
+            endpoints={
+                "decode": "inproc://decode",
+                "generation": "inproc://generation",
+            },
             get_next=lambda request_id, output: output.request.metadata["next"],
-            stream_targets=["talker", "decode"],
+            stream_targets=["generation", "decode"],
             get_stream_done_targets=lambda request_id, output: output.request.metadata[
                 "stream_targets"
             ],
@@ -982,7 +990,7 @@ def test_stage_sends_same_process_payload_as_local_object(monkeypatch) -> None:
         receiver_scheduler = FakeScheduler()
         receiver = make_stage(name="decode", scheduler=receiver_scheduler)
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             endpoints={"decode": "inproc://decode"},
             relay=relay,
             control_plane=control_plane,
@@ -1014,7 +1022,7 @@ def test_stage_sends_same_process_payload_as_local_object(monkeypatch) -> None:
     assert hop_events == [
         {
             "request_id": "req-local",
-            "stage": "thinker",
+            "stage": "understanding",
             "event_name": "stage_hop_sent",
             "metadata": {"to_stage": "decode", "transport": "local_object"},
         }
@@ -1027,7 +1035,7 @@ def test_stage_applies_projector_before_local_object_send() -> None:
         receiver_scheduler = FakeScheduler()
         receiver = make_stage(name="decode", scheduler=receiver_scheduler)
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             endpoints={"decode": "inproc://decode"},
             project_payload={"decode": make_noop_projector("decode-only")},
             same_process_targets={"decode"},
@@ -1059,7 +1067,7 @@ def test_stage_local_object_preserves_fan_in_semantics() -> None:
             name="aggregate",
             scheduler=receiver_scheduler,
             input_handler=AggregatedInput(
-                {"preprocess", "thinker"},
+                {"preprocess", "understanding"},
                 lambda payloads: make_stage_payload(
                     request_id="req-local",
                     data={
@@ -1077,8 +1085,8 @@ def test_stage_local_object_preserves_fan_in_semantics() -> None:
             same_process_targets={"aggregate"},
             local_dispatcher=dispatcher,
         )
-        thinker = make_stage(
-            name="thinker",
+        understanding = make_stage(
+            name="understanding",
             endpoints={"aggregate": "inproc://aggregate"},
             same_process_targets={"aggregate"},
             local_dispatcher=dispatcher,
@@ -1093,7 +1101,7 @@ def test_stage_local_object_preserves_fan_in_semantics() -> None:
         )
         assert receiver_scheduler.inbox.empty()
 
-        await thinker.send_to_stage(
+        await understanding.send_to_stage(
             "req-local",
             "aggregate",
             make_stage_payload(request_id="req-local", data={"t": 2}),
@@ -1102,10 +1110,10 @@ def test_stage_local_object_preserves_fan_in_semantics() -> None:
 
         queued = receiver_scheduler.inbox.get_nowait()
         assert queued.type == "new_request"
-        assert queued.data.data["sources"] == ["preprocess", "thinker"]
+        assert queued.data.data["sources"] == ["preprocess", "understanding"]
         assert queued.data.data["values"] == {
             "preprocess": {"p": 1},
-            "thinker": {"t": 2},
+            "understanding": {"t": 2},
         }
 
     asyncio.run(run())
@@ -1116,7 +1124,7 @@ def test_stage_fan_out_payloads_materialize_when_local_object_is_unsafe() -> Non
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: ["decode", "archive"],
             endpoints={
                 "decode": "inproc://decode",
@@ -1163,7 +1171,7 @@ def test_stage_projected_fan_out_payloads_use_local_object_when_isolated() -> No
         decode = make_stage(name="decode", scheduler=decode_scheduler)
         archive = make_stage(name="archive", scheduler=archive_scheduler)
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: ["decode", "archive"],
             endpoints={
                 "decode": "inproc://decode",
@@ -1214,7 +1222,7 @@ def test_stage_projected_fan_out_requires_isolated_data_container() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: ["decode", "archive"],
             endpoints={
                 "decode": "inproc://decode",
@@ -1260,7 +1268,7 @@ def test_stage_projected_fan_out_rejects_nested_mutable_aliases() -> None:
         decode = make_stage(name="decode", scheduler=FakeScheduler())
         archive = make_stage(name="archive", scheduler=FakeScheduler())
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: ["decode", "archive"],
             endpoints={
                 "decode": "inproc://decode",
@@ -1307,7 +1315,7 @@ def test_stage_projected_fan_out_rejects_wrapped_original_data() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: ["decode", "archive"],
             endpoints={
                 "decode": "inproc://decode",
@@ -1353,7 +1361,7 @@ def test_stage_projected_fan_out_allows_tensor_leaf_sharing() -> None:
         decode_scheduler = FakeScheduler()
         decode = make_stage(name="decode", scheduler=decode_scheduler)
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: "decode",
             endpoints={"decode": "inproc://decode"},
             relay=relay,
@@ -1388,7 +1396,7 @@ def test_stage_projected_fan_out_requires_stage_payload_projection() -> None:
 
     async def run() -> None:
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: ["decode", "archive"],
             endpoints={
                 "decode": "inproc://decode",
@@ -1427,17 +1435,17 @@ def test_stage_sends_same_process_stream_chunk_as_local_object(monkeypatch) -> N
         control_plane = RecordingStageControlPlane()
         receiver_scheduler = FakeScheduler()
         receiver = make_stage(
-            name="talker",
+            name="generation",
             scheduler=receiver_scheduler,
             can_accept_stream_before_payload=True,
         )
         receiver.stream_queue = StreamQueue()
         sender = make_stage(
-            name="thinker",
-            endpoints={"talker": "inproc://talker"},
+            name="understanding",
+            endpoints={"generation": "inproc://generation"},
             relay=relay,
             control_plane=control_plane,
-            same_process_targets={"talker"},
+            same_process_targets={"generation"},
             local_dispatcher=dispatcher,
         )
         dispatcher.register_many([sender, receiver])
@@ -1448,7 +1456,7 @@ def test_stage_sends_same_process_stream_chunk_as_local_object(monkeypatch) -> N
         await sender.send_stream_to_target(
             "req-stream-local",
             chunk,
-            "talker",
+            "generation",
             metadata,
         )
 
@@ -1470,9 +1478,9 @@ def test_stage_sends_same_process_stream_chunk_as_local_object(monkeypatch) -> N
     assert receive_events == [
         {
             "request_id": "req-stream-local",
-            "stage": "talker",
+            "stage": "generation",
             "event_name": "stage_stream_chunk_received",
-            "metadata": {"from_stage": "thinker", "chunk_id": 0},
+            "metadata": {"from_stage": "understanding", "chunk_id": 0},
         }
     ]
 
@@ -1495,30 +1503,30 @@ def test_stage_sends_same_gpu_stream_chunk_as_direct_cuda_ipc(monkeypatch) -> No
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = Stage(
-            name="talker_ar",
+            name="planning",
             role="single",
             get_next=lambda request_id, output: None,
             gpu_id=0,
-            endpoints={"code2wav": "inproc://code2wav"},
+            endpoints={"asr": "inproc://asr"},
             control_plane=control_plane,
             relay=relay,
             scheduler=FakeScheduler(),
-            gpu_stage_names={"code2wav"},
-            stage_gpu_ids={"code2wav": (0,)},
+            gpu_stage_names={"asr"},
+            stage_gpu_ids={"asr": (0,)},
         )
 
         data = torch.arange(4, device="cuda:0")
         await sender.send_stream_to_target(
             "req-same-gpu",
             data,
-            "code2wav",
+            "asr",
             {"modality": "audio_codes"},
         )
 
         assert relay.storage == {}
         target, endpoint, msg = control_plane.sent_to_stage[0]
-        assert target == "code2wav"
-        assert endpoint == "inproc://code2wav"
+        assert target == "asr"
+        assert endpoint == "inproc://asr"
         assert msg.data_ref["_type"] == "TorchCudaIpcStreamChunk"
         assert msg.chunk_id == 0
 
@@ -1545,21 +1553,21 @@ def test_stage_can_disable_same_gpu_direct_cuda_payload(monkeypatch) -> None:
             role="single",
             get_next=lambda request_id, output: None,
             gpu_id=0,
-            endpoints={"thinker": "inproc://thinker"},
+            endpoints={"understanding": "inproc://understanding"},
             control_plane=control_plane,
             relay=relay,
             scheduler=FakeScheduler(),
-            gpu_stage_names={"thinker"},
-            stage_gpu_ids={"thinker": (0,)},
+            gpu_stage_names={"understanding"},
+            stage_gpu_ids={"understanding": (0,)},
             disable_direct_cuda_ipc_payload=True,
         )
 
         payload = make_tensor_payload(request_id="req-direct-disabled")
-        await sender.send_to_stage("req-direct-disabled", "thinker", payload)
+        await sender.send_to_stage("req-direct-disabled", "understanding", payload)
 
         target, endpoint, msg = control_plane.sent_to_stage[0]
-        assert target == "thinker"
-        assert endpoint == "inproc://thinker"
+        assert target == "understanding"
+        assert endpoint == "inproc://understanding"
         assert msg.data_ref["_type"] == "DataRef"
         assert relay.storage
 
@@ -1584,20 +1592,20 @@ def test_stage_uses_relay_when_direct_cuda_payload_is_reexported(monkeypatch) ->
             role="single",
             get_next=lambda request_id, output: None,
             gpu_id=0,
-            endpoints={"talker_ar": "inproc://talker"},
+            endpoints={"planning": "inproc://generation"},
             control_plane=control_plane,
             relay=relay,
             scheduler=FakeScheduler(),
-            gpu_stage_names={"talker_ar"},
-            stage_gpu_ids={"talker_ar": (0,)},
+            gpu_stage_names={"planning"},
+            stage_gpu_ids={"planning": (0,)},
         )
 
         payload = make_tensor_payload(request_id="req-reexport")
-        await sender.send_to_stage("req-reexport", "talker_ar", payload)
+        await sender.send_to_stage("req-reexport", "planning", payload)
 
         target, endpoint, msg = control_plane.sent_to_stage[0]
-        assert target == "talker_ar"
-        assert endpoint == "inproc://talker"
+        assert target == "planning"
+        assert endpoint == "inproc://generation"
         assert msg.data_ref["_type"] == "DataRef"
         assert relay.storage
 
@@ -1710,7 +1718,7 @@ def test_stage_sends_same_process_stream_done_and_final_payload_locally() -> Non
         )
         receiver.stream_queue = StreamQueue()
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: "decode",
             endpoints={"decode": "inproc://decode"},
             relay=relay,
@@ -1743,7 +1751,7 @@ def test_stage_allows_local_payload_when_static_stream_target_is_inactive() -> N
         receiver_scheduler = FakeScheduler()
         receiver = make_stage(name="decode", scheduler=receiver_scheduler)
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: "decode",
             get_stream_done_targets=lambda request_id, output: None,
             endpoints={"decode": "inproc://decode"},
@@ -1772,7 +1780,7 @@ def test_stage_preserves_relay_order_when_target_also_receives_stream() -> None:
         relay = FakeRelay()
         control_plane = RecordingStageControlPlane()
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             get_next=lambda request_id, output: "decode",
             endpoints={"decode": "inproc://decode"},
             relay=relay,
@@ -1797,7 +1805,7 @@ def test_stage_preserves_relay_order_when_target_also_receives_stream() -> None:
 
 def test_stage_payload_send_requires_endpoint() -> None:
     async def run() -> None:
-        sender = make_stage(name="thinker", endpoints={})
+        sender = make_stage(name="understanding", endpoints={})
 
         with pytest.raises(RuntimeError, match="no endpoint configured"):
             await sender.send_to_stage(
@@ -1812,7 +1820,7 @@ def test_stage_payload_send_requires_endpoint() -> None:
 def test_stage_local_object_requires_registered_target() -> None:
     async def run() -> None:
         sender = make_stage(
-            name="thinker",
+            name="understanding",
             endpoints={"decode": "inproc://decode"},
             same_process_targets={"decode"},
             local_dispatcher=LocalStageDispatcher(),
@@ -1834,22 +1842,24 @@ def test_stage_self_route_preserves_reentered_request_state(replicated: bool) ->
     async def _run() -> None:
         dispatcher = LocalStageDispatcher()
         scheduler = FakeScheduler()
-        name = "thinker@r1" if replicated else "thinker"
+        name = "understanding@r1" if replicated else "understanding"
         stage = make_stage(
             name=name,
-            get_next=lambda request_id, output: "thinker",
-            endpoints={name: "inproc://thinker"},
+            get_next=lambda request_id, output: "understanding",
+            endpoints={name: "inproc://understanding"},
             scheduler=scheduler,
             same_process_targets={name},
             local_dispatcher=dispatcher,
             replica_topology=(
-                {"thinker": ["thinker@r0", "thinker@r1"]} if replicated else None
+                {"understanding": ["understanding@r0", "understanding@r1"]}
+                if replicated
+                else None
             ),
         )
         dispatcher.register(stage)
         stage.active_requests.add("req-reentry")
         if replicated:
-            stage.record_replica_bindings("req-reentry", {"thinker": 1})
+            stage.record_replica_bindings("req-reentry", {"understanding": 1})
 
         await stage.route_result(
             "req-reentry",
@@ -1861,7 +1871,7 @@ def test_stage_self_route_preserves_reentered_request_state(replicated: bool) ->
         assert queued.data.data == {"phase": 2}
         assert "req-reentry" in stage.active_requests
         if replicated:
-            assert stage.replica_bindings["req-reentry"] == {"thinker": 1}
+            assert stage.replica_bindings["req-reentry"] == {"understanding": 1}
 
     asyncio.run(_run())
 
@@ -1870,14 +1880,14 @@ def test_local_dispatch_propagates_replica_bindings_to_receiver() -> None:
     async def run() -> None:
         dispatcher = LocalStageDispatcher()
         receiver = make_stage(
-            name="thinker",
+            name="understanding",
             scheduler=FakeScheduler(),
             replica_topology={"decode": ["decode@r0", "decode@r1"]},
         )
         sender = make_stage(
             name="mm_aggregate",
-            endpoints={"thinker": "inproc://thinker"},
-            same_process_targets={"thinker"},
+            endpoints={"understanding": "inproc://understanding"},
+            same_process_targets={"understanding"},
             local_dispatcher=dispatcher,
         )
         sender.record_replica_bindings("req-local", {"decode": 1})
@@ -1885,7 +1895,7 @@ def test_local_dispatch_propagates_replica_bindings_to_receiver() -> None:
 
         await sender.send_to_stage(
             "req-local",
-            "thinker",
+            "understanding",
             make_stage_payload(request_id="req-local", data={"x": 1}),
             allow_local_object=True,
         )
@@ -1898,17 +1908,17 @@ def test_local_dispatch_propagates_replica_bindings_to_receiver() -> None:
 
 def test_resolve_target_instance_without_binding_raises() -> None:
     stage = make_stage(
-        name="talker_ar",
-        replica_topology={"code2wav": ["code2wav@r0", "code2wav@r1"]},
+        name="planning",
+        replica_topology={"asr": ["asr@r0", "asr@r1"]},
     )
     with pytest.raises(RuntimeError, match="no replica binding"):
-        stage.resolve_target_instance("req-x", "code2wav")
+        stage.resolve_target_instance("req-x", "asr")
 
 
 def test_completed_request_id_can_record_new_replica_bindings() -> None:
     async def run() -> None:
         stage = make_stage(
-            name="thinker",
+            name="understanding",
             replica_topology={"decode": ["decode@r0", "decode@r1"]},
         )
         stage.record_replica_bindings("req-1", {"decode": 0})
@@ -1931,7 +1941,7 @@ def test_completed_request_id_can_record_new_replica_bindings() -> None:
 def test_aborted_request_id_resubmit_fails_without_new_state() -> None:
     async def run() -> None:
         stage = make_stage(
-            name="thinker",
+            name="understanding",
             replica_topology={"decode": ["decode@r0", "decode@r1"]},
         )
         stage.record_aborted_request_id("req-1")

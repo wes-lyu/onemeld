@@ -3,7 +3,7 @@
 
 SGLang owns quantization end-to-end: it parses `quantization_config`,
 constructs quantized layers, and executes post-load hooks. This module only
-provides the Qwen3-Omni-specific compatibility SGLang cannot infer by itself:
+provides the stage-local compatibility SGLang cannot infer by itself:
 stage-local AutoRound config normalization and FP8 scale preprocessing for
 custom weight loaders.
 """
@@ -26,12 +26,9 @@ _QUANT_METADATA_KEYS: tuple[str, ...] = ("quantization_config", "compression_con
 _NESTED_QUANT_CONFIG_ATTRS: tuple[str, ...] = (
     "text_config",
     "thinker_config",
-    "talker_config",
 )
 _STAGE_PREFIX_BY_ARCH: dict[str, str] = {
-    "Qwen3OmniThinkerForCausalLM": "thinker.",
     "Qwen3ASRForConditionalGeneration": "thinker.",
-    "Qwen3OmniTalker": "talker.",
 }
 
 __all__ = [

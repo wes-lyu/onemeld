@@ -46,7 +46,7 @@ def force_cuda_device(monkeypatch):
 
 def tp_spec(*, gpu_id: int) -> StageLaunchConfig:
     return StageLaunchConfig(
-        stage_name="thinker",
+        stage_name="understanding",
         role="leader",
         tp_rank=0,
         tp_size=2,
@@ -279,7 +279,7 @@ def test_tp_child_keeps_parent_mapped_visible_device(monkeypatch) -> None:
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4")
     monkeypatch.setenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "true")
     spec = StageLaunchConfig(
-        stage_name="thinker",
+        stage_name="understanding",
         role="follower",
         tp_rank=1,
         tp_size=2,
@@ -306,7 +306,7 @@ def test_tp_child_keeps_parent_mapped_visible_device(monkeypatch) -> None:
 def test_spawn_env_applies_stage_defaults_before_child_start(monkeypatch) -> None:
     monkeypatch.delenv("SGLANG_TEST_STAGE_ENV", raising=False)
     spec = StageLaunchConfig(
-        stage_name="thinker",
+        stage_name="understanding",
         env_defaults={"SGLANG_TEST_STAGE_ENV": "default"},
     )
 
@@ -319,7 +319,7 @@ def test_spawn_env_applies_stage_defaults_before_child_start(monkeypatch) -> Non
 def test_spawn_env_preserves_operator_stage_defaults(monkeypatch) -> None:
     monkeypatch.setenv("SGLANG_TEST_STAGE_ENV", "operator")
     spec = StageLaunchConfig(
-        stage_name="thinker",
+        stage_name="understanding",
         env_defaults={"SGLANG_TEST_STAGE_ENV": "default"},
     )
 
@@ -404,11 +404,11 @@ def test_scheduler_applies_child_defaults_without_overriding_explicit_args(
 
     monkeypatch.setattr(stage_workers, "gpu_startup_lock", fake_lock)
     spec = StageLaunchConfig(
-        stage_name="thinker",
+        stage_name="understanding",
         factory=fake_factory_path("runtime_factory"),
         factory_kwargs={
             "model_path": "runtime-model",
-            "thinker_max_seq_len": 128,
+            "max_seq_len": 128,
         },
         factory_arg_defaults={
             "model_path": "global-model",
@@ -421,7 +421,7 @@ def test_scheduler_applies_child_defaults_without_overriding_explicit_args(
 
     assert result["model_path"] == "runtime-model"
     assert result["gpu_id"] == 3
-    assert result["thinker_max_seq_len"] == 128
+    assert result["max_seq_len"] == 128
     assert result["total_gpu_memory_fraction"] == 0.25
     assert seen_gpu_ids == [3]
 
@@ -543,7 +543,7 @@ def test_narrowed_tp_child_locks_its_local_device(monkeypatch) -> None:
 
     monkeypatch.setattr(stage_workers, "gpu_startup_lock", fake_lock)
     spec = StageLaunchConfig(
-        stage_name="thinker",
+        stage_name="understanding",
         role="follower",
         tp_rank=1,
         tp_size=2,

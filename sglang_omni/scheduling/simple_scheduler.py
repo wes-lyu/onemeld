@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """SimpleScheduler — lightweight scheduler for non-AR stages.
 
-For stages that just run a function (preprocessing, encoders, decode, code2wav).
+For stages that just run a function (preprocessing, encoders, decode).
 No KV cache. The default is one-at-a-time execution, with optional explicit
 batching through batch_compute_fn.
 
@@ -48,7 +48,7 @@ class SimpleScheduler(Generic[ComputeInput, ComputeResult]):
     A batch_key_fn can keep incompatible requests in separate batches.
     shutdown_join_timeout_s bounds how long the stage waits for the compute thread on stop; None uses the stage default.
     Streaming stages should provide a dedicated scheduler implementation
-    (for example ``Code2WavScheduler``) rather than rely on SimpleScheduler.
+    rather than rely on SimpleScheduler.
     """
 
     def __init__(

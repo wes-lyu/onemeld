@@ -9,7 +9,7 @@ Low-level mechanics (decode, load, resample, fingerprint) stay in
 
 Model-specific: ``source_name`` used in error messages, duration limit where
 the model has one, and the custom ``source_resolver`` when the model accepts
-sources beyond the default payload keys (e.g. MOSS-Transcribe-Diarize).
+sources beyond the default payload keys.
 """
 
 from __future__ import annotations

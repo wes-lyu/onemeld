@@ -421,8 +421,7 @@ class Qwen3ASRPreLMEncoderService(
         # note (luojiaxuan): the default window is 0 (greedy drain): items
         # that queued while the previous batch encoded are taken instantly,
         # so batches still form under load, and an idle-arrival request never
-        # pays a batching wait -- at concurrency 1 a window is pure latency
-        # (same reasoning as the MOSS-TD encoder service).
+        # pays a batching wait -- at concurrency 1 a window is pure latency.
         first = self.queue.get()
         if first is QueueSignal.SHUTDOWN:
             return [], True

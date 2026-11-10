@@ -12,7 +12,7 @@ _BAD_REQUEST_MARKERS = (
     "longer than the model's context length",
     "Requested token count exceeds the model's maximum context length",
     "Request has no prompt tokens",
-    "Request requires more tokens than the thinker KV cache can hold",
+    "Request requires more tokens than the KV cache can hold",
     "out-of-vocabulary token id",
     "accepts audio up to",
     "could not decode the uploaded audio",

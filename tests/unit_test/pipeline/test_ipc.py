@@ -72,7 +72,7 @@ class StubCoordinator:
 
 def make_config(base_path: Path) -> PipelineConfig:
     return PipelineConfig(
-        model_path="Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        model_path="Qwen/Qwen3-VL-4B-Instruct",
         entry_stage="preprocessing",
         stages=[
             StageConfig(
@@ -273,7 +273,7 @@ async def test_mp_runner_cleans_spawned_groups_when_later_spawn_fails(
             self.channels_closed = True
 
     first_group = FakeGroup("preprocessing")
-    second_group = FakeGroup("thinker", fail_spawn=True)
+    second_group = FakeGroup("understanding", fail_spawn=True)
     monkeypatch.setattr(mp_runner, "Coordinator", StubCoordinator)
     monkeypatch.setattr(
         mp_runner,
@@ -297,7 +297,7 @@ async def test_mp_runner_startup_failure_includes_child_factory_traceback(
     tmp_path: Path,
 ) -> None:
     config = PipelineConfig(
-        model_path="Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        model_path="Qwen/Qwen3-VL-4B-Instruct",
         name="x",
         entry_stage="preprocessing",
         stages=[

@@ -34,7 +34,6 @@ from sglang_omni.scheduling.types import (
     RequestDataT,
     StreamOutputBuilder,
 )
-from sglang_omni.utils.checkpoint import resolve_checkpoint as _resolve_checkpoint
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -100,8 +99,8 @@ class SGLangGenerationEngineBuilder(ABC, Generic[RequestDataT]):
 
     Model-specific builders provide checkpoint preprocessing, model setup,
     request/result adapters, validation policy, and any stage-owned resources.
-    Family-specific builders such as :class:`AsrEngineBuilder` and
-    :class:`TtsEngineBuilder` define the lifecycle policy for each modality.
+    Family-specific builders such as :class:`AsrEngineBuilder` define the
+    lifecycle policy for each modality.
     """
 
     model_name: str
@@ -591,99 +590,3 @@ class AsrEngineBuilder(SGLangGenerationEngineBuilder[RequestDataT]):
         from sglang_omni.model_runner.base import ModelRunner
 
         return ModelRunner(model_worker, output_proc)
-
-
-class TtsEngineBuilder(SGLangGenerationEngineBuilder[RequestDataT]):
-    """Compatibility builder preserving the historical TTS contract."""
-
-    @abstractmethod
-    def setup_model(
-        self,
-        *,
-        model_worker: ModelWorker,
-        checkpoint_dir: str,
-        device: str,
-        gpu_id: int,
-        server_args: ServerArgs,
-    ) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def make_model_runner(
-        self,
-        model_worker: ModelWorker,
-        output_proc: SGLangOutputProcessor,
-    ) -> ModelRunner[RequestDataT]:
-        raise NotImplementedError
-
-    def resolve_checkpoint(self, model_path: str) -> str:
-        return _resolve_checkpoint(model_path)
-
-    def validate_before_infrastructure(self, server_args: ServerArgs) -> None:
-        del server_args
-
-    def validate_after_model_setup(
-        self, model: torch.nn.Module, server_args: ServerArgs
-    ) -> None:
-        validate_generation_batch_policy(
-            model_name=self.model_name,
-            server_args=server_args,
-            model_buffer_bs=self.get_model_buffer_bs(model),
-            allowed_prefill_backends=self.allowed_prefill_cuda_graph_backends(),
-        )
-
-    def make_scheduler(
-        self,
-        *,
-        model_worker: ModelWorker,
-        tree_cache: BasePrefixCache,
-        req_to_token_pool: ReqToTokenPool,
-        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
-        server_args: ServerArgs,
-        model_config: ModelConfig,
-        model_runner: ModelRunner[RequestDataT],
-        request_builder: (
-            Callable[[StagePayload], RequestDataT | DeferredAdmission[RequestDataT]]
-            | None
-        ),
-        result_adapter: Callable[[RequestDataT], StagePayload] | None,
-    ) -> "OmniScheduler[RequestDataT]":
-        return super().make_scheduler(
-            model_worker=model_worker,
-            tree_cache=tree_cache,
-            req_to_token_pool=req_to_token_pool,
-            token_to_kv_pool_allocator=token_to_kv_pool_allocator,
-            server_args=server_args,
-            model_config=model_config,
-            model_runner=model_runner,
-            request_builder=request_builder,
-            result_adapter=result_adapter,
-            extra_scheduler_kwargs=self.extra_scheduler_kwargs(),
-        )
-
-    def build_runtime(
-        self,
-        *,
-        model_worker: ModelWorker,
-        model: torch.nn.Module,
-        output_proc: SGLangOutputProcessor,
-        tree_cache: BasePrefixCache,
-        req_to_token_pool: ReqToTokenPool,
-        token_to_kv_pool_allocator: BaseTokenToKVPoolAllocator,
-        server_args: ServerArgs,
-        model_config: ModelConfig,
-    ) -> tuple["OmniScheduler[RequestDataT]", ModelRunner[RequestDataT]]:
-        model_runner = self.make_model_runner(model_worker, output_proc)
-        request_builder, result_adapter = self.make_adapters(model)
-        scheduler = self.make_scheduler(
-            model_worker=model_worker,
-            tree_cache=tree_cache,
-            req_to_token_pool=req_to_token_pool,
-            token_to_kv_pool_allocator=token_to_kv_pool_allocator,
-            server_args=server_args,
-            model_config=model_config,
-            model_runner=model_runner,
-            request_builder=request_builder,
-            result_adapter=result_adapter,
-        )
-        return scheduler, model_runner

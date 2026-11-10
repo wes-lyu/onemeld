@@ -17,11 +17,11 @@ Precedence is ``(layer, specificity, path depth, insertion order)``:
   ``Layer.CLI > Layer.USER_FILE``, not because of the order helpers happen to
   run in ``cli/serve.py``.
 * **specificity** separates spellings *within* one source. ``--mem-fraction-static``
-  broadcasts to every engine stage, ``--thinker.engine.mem_fraction_static``
+  broadcasts to every engine stage, ``--understanding.engine.mem_fraction_static``
   names one stage; both are legal at once and the explicit path must win.
 * **path depth** makes a container patch apply before a patch nested inside it,
-  so ``stages.thinker.env`` never clobbers a sibling
-  ``stages.thinker.env.OMP_NUM_THREADS``.
+  so ``stages.understanding.env`` never clobbers a sibling
+  ``stages.understanding.env.OMP_NUM_THREADS``.
 * **insertion order** is the final tie-break, and only ever applies to patches
   that a duplicate check has already accepted.
 """
@@ -71,7 +71,7 @@ class Specificity(IntEnum):
     """A ``shared:`` selector entry expanded onto its matched stages."""
 
     EXPLICIT = 20
-    """A path the user wrote out in full, e.g. ``--thinker.tp_size``."""
+    """A path the user wrote out in full, e.g. ``--understanding.tp_size``."""
 
 
 class SourceKind(str, Enum):
@@ -254,7 +254,7 @@ class ConfigPatchSet:
         """Refuse a path two equally-ranked sources disagree about.
 
         Deliberately an error rather than a rule. Nothing about
-        ``--thinker.tp_size 4 --thinker.tp_size 8`` says which
+        ``--understanding.tp_size 4 --understanding.tp_size 8`` says which
         one the user meant, and any tie-break this code invented -- argument
         order, flag length, alphabetical -- would be a rule people had to learn
         in order to predict what their own command line does.

@@ -83,32 +83,6 @@ def rank_shared_unseeded_sampling_seed(request: SchedulerRequest, row_idx: int) 
     return derive_sampling_seed("sglang-omni-unseeded-row", request_id)
 
 
-def resolve_deferred_prefill_inputs(
-    schedule_batch: ScheduleBatch, device: torch.device
-) -> None:
-    """Materialize staged CPU prefill inputs before a direct worker forward.
-
-    Scheduler-owned execution resolves staging through SGLangExecutionBridge;
-    DllmScheduler calls this before invoking the worker directly.
-    """
-    staged_input_ids = schedule_batch.prefill_input_ids_cpu
-    if staged_input_ids is None:
-        return
-    else:
-        pass
-
-    if schedule_batch.mix_running_indices is not None:
-        raise RuntimeError(
-            "Omni does not support SGLang mixed chunked-prefill batches with "
-            "deferred decode tokens"
-        )
-    else:
-        pass
-
-    schedule_batch.input_ids = staged_input_ids.to(device, non_blocking=True)
-    schedule_batch.prefill_input_ids_cpu = None
-
-
 @dataclass
 class PendingStep:
     """One decode step launched on the GPU but not yet consumed on the host.
@@ -118,8 +92,8 @@ class PendingStep:
     after, so ``event.query()`` true means the launched step's GPU work is
     published. ``launch_buf`` is whatever ``post_decode_launch`` returns for
     resolve to consume: a device-side correctness snapshot of the published ids
-    (MOSS-TTS-Local, no host copy), or a pinned host staging buffer an async host
-    copy filled (Higgs); only the latter provides host-D2H overlap.
+    (no host copy), or a pinned host staging buffer an async host copy filled;
+    only the latter provides host-D2H overlap.
     ``execute_resolve`` later waits on ``event`` and reads ``launch_buf``.
 
     Invariant: at most one ``_PendingStep`` is live at a time (see
@@ -168,8 +142,8 @@ class ModelRunner(Generic[RequestDataInput]):
         # Observability: how often resolve found the launched step's event
         # already done (no blocking) vs had to block on synchronize(). This
         # counts whether the launched step's GPU work was published in time; it
-        # does NOT measure host-D2H overlap (only host-staging runners like Higgs
-        # overlap a host copy; the device-snapshot path does not).
+        # does NOT measure host-D2H overlap (only host-staging runners overlap a
+        # host copy; the device-snapshot path does not).
         self.async_query_hit: int = 0
         self.async_query_miss: int = 0
         self.token_id_host_bufs: list[torch.Tensor] | None = None
@@ -372,9 +346,8 @@ class ModelRunner(Generic[RequestDataInput]):
     ) -> torch.Tensor:
         """Return a pinned host staging buffer covering ``shape``/``dtype``,
         ping-ponging between two buffers on each call. Runners that stage the
-        collect to host use this: Higgs passes its fixed CG staging shape, the
-        base plain-LM launch passes the step's ``(batch_size,)`` ids shape.
-        Device-snapshot runners (MOSS-TTS-Local) never do.
+        collect to host use this: the base plain-LM launch passes the step's
+        ``(batch_size,)`` ids shape. Device-snapshot runners never do.
 
         Two buffers are required: resolve(N) reads one on the host while
         launch(N+1)'s async host copy writes the other. That CPU-read vs
@@ -455,8 +428,8 @@ class ModelRunner(Generic[RequestDataInput]):
         ``post_decode_launch`` to publish a model-specific resolve payload
         (returned as launch_buf), and record a device event right after
         publication. Does NOT wait on the GPU. ``launch_buf``
-        is a device-side correctness snapshot (MOSS-TTS-Local) or pinned host
-        staging (Higgs); only the latter overlaps a host copy with the next
+        is a device-side correctness snapshot or pinned host staging; only the
+        latter overlaps a host copy with the next
         forward, and ``event.query()`` proves the launched step's GPU work is
         done, not that any host overlap happened.
 

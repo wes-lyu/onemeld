@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Lint if statements that have no else. Checking does not rewrite files.
 
-Every Python file under sglang_omni/ is in scope, including files added later.
+Every Python file under onemeld/ is in scope, including files added later.
 Vendor copies are ignored. An if/elif chain is legal only when it ends in else.
 A bare if, including one that returns or raises, is a violation. There is no
 noqa exemption.
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOT = REPO_ROOT / "sglang_omni"
+SOURCE_ROOT = REPO_ROOT / "onemeld"
 VENDOR_ROOT = SOURCE_ROOT / "vendor"
 PASS_INDENT = "    "
 
@@ -189,7 +189,7 @@ def report_violations(violations: list[Violation]) -> int:
     for violation in violations:
         print(format_violation(violation), file=sys.stderr)
     print(
-        f"{len(violations)} if statement(s) without else in sglang_omni/. "
+        f"{len(violations)} if statement(s) without else in onemeld/. "
         "At least use `else: pass` to fix this lint, "
         "or run `python scripts/check_if_else.py --fix`.",
         file=sys.stderr,
@@ -246,9 +246,7 @@ def run_fix(paths: list[Path]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "paths", nargs="*", help="Python files (defaults to sglang_omni/)"
-    )
+    parser.add_argument("paths", nargs="*", help="Python files (defaults to onemeld/)")
     parser.add_argument(
         "--fix",
         action="store_true",

@@ -1,5 +1,5 @@
-# OneMeld on one 48 GB CUDA GPU, every model hosted with SGLang.
-# Install: uv pip install -e ".[sglang]"
+# OneMeld on one CUDA GPU, every model hosted with SGLang.
+# SenseNova comes from SGLang-Omni: uv pip install -e ".[sglang-omni]"
 model_name: onemeld
 
 backends:

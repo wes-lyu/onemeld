@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Lint and optionally rename leading-underscore names.
 
-Every Python file under sglang_omni/ and tests/ is in scope, including files
-added later (new model packages under sglang_omni/models/, new test suites,
+Every Python file under onemeld/ and tests/ is in scope, including files
+added later (new model packages under onemeld/models/, new test suites,
 etc.). There is no per-directory allowlist: a new path is checked as soon as it
 exists.
 
@@ -34,41 +34,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_ROOT = REPO_ROOT / "sglang_omni"
+SOURCE_ROOT = REPO_ROOT / "onemeld"
 TESTS_ROOT = REPO_ROOT / "tests"
 LINTED_ROOTS = (SOURCE_ROOT, TESTS_ROOT)
 VENDOR_ROOT = SOURCE_ROOT / "vendor"
 NOQA_CODE = "leading-underscore"
 
-# (posix path relative to repo root, definition name)
-ALLOWED_DEFS: frozenset[tuple[str, str]] = frozenset(
-    {
-        # queue.Queue internals
-        ("sglang_omni/scheduling/threaded_simple_scheduler.py", "_init"),
-        ("sglang_omni/scheduling/threaded_simple_scheduler.py", "_put"),
-        ("sglang_omni/scheduling/threaded_simple_scheduler.py", "_get"),
-        # SGLang ModelRunner / Scheduler / cache hooks
-        ("sglang_omni/model_runner/sglang_model_runner.py", "_extend_forward_kwargs"),
-        (
-            "sglang_omni/model_runner/sglang_model_runner.py",
-            "_resolve_draft_load_format",
-        ),
-        ("sglang_omni/model_runner/sglang_model_runner.py", "_profile_available_bytes"),
-        ("sglang_omni/scheduling/omni_scheduler.py", "_add_request_to_queue"),
-        (
-            "sglang_omni/scheduling/sglang_backend/evict_heap_radix_cache.py",
-            "_update_leaf_status",
-        ),
-        # OmniPlatform hook kept to avoid infinite recursion
-        ("sglang_omni/platforms/interface.py", "_get_device_graph_backend"),
-        ("sglang_omni/platforms/cuda.py", "_get_device_graph_backend"),
-        # Same-scope public name already exists
-        ("sglang_omni/scheduling/omni_scheduler.py", "_run_batch"),
-        # Remaining production exceptions carried from the rename
-        ("sglang_omni/preprocessing/resource_connector.py", "_assert_url_allowed"),
-        ("sglang_omni/config/placement.py", "_resolve_stage_gpu_ids"),
-    }
-)
+# (posix path relative to repo root, definition name) of a name an outside
+# contract fixes, such as a framework hook this repository overrides.
+ALLOWED_DEFS: frozenset[tuple[str, str]] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -623,7 +597,7 @@ def report_violations(violations: list[Violation]) -> int:
         print(format_violation(violation), file=sys.stderr)
     print(
         f"{len(violations)} leading-underscore class/function/attribute name(s) "
-        f"in sglang_omni/ and tests/",
+        f"in onemeld/ and tests/",
         file=sys.stderr,
     )
     return 1
@@ -662,7 +636,7 @@ def run_fix(paths: list[Path]) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "paths", nargs="*", help="Python files (defaults to sglang_omni/ and tests/)"
+        "paths", nargs="*", help="Python files (defaults to onemeld/ and tests/)"
     )
     parser.add_argument(
         "--fix",

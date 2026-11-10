@@ -6,6 +6,8 @@ import asyncio
 import logging
 import os
 import sys
+import threading
+import time
 import traceback
 
 import zmq
@@ -87,10 +89,16 @@ class Worker:
         await self.backend.close()
 
 
-async def lifetime(socket: zmq.asyncio.Socket, spec: BackendSpec) -> int:
-    """Start the backend, serve until shutdown, and report each transition."""
+async def lifetime(
+    socket: zmq.asyncio.Socket, backend: Backend | None, load_error: str | None
+) -> int:
+    """Start the loaded backend, serve until shutdown, and report each transition."""
+    if backend is None:
+        await socket.send(pack({"kind": "failed", "error": load_error}))
+        return 1
+    else:
+        pass
     try:
-        backend = load_backend(spec)
         await backend.start()
     except Exception:
         await socket.send(pack({"kind": "failed", "error": traceback.format_exc()}))
@@ -105,34 +113,28 @@ async def lifetime(socket: zmq.asyncio.Socket, spec: BackendSpec) -> int:
     return 0
 
 
-async def orphaned(parent_pid: int) -> None:
-    """Return once the orchestrator that started this worker has exited."""
-    while os.getppid() == parent_pid:
-        await asyncio.sleep(PARENT_POLL_INTERVAL_S)
-
-
-async def run_worker(endpoint: str, spec: BackendSpec, parent_pid: int) -> int:
+async def run_worker(
+    endpoint: str, backend: Backend | None, load_error: str | None
+) -> int:
     context = zmq.asyncio.Context()
     socket = context.socket(zmq.PAIR)
     socket.connect(endpoint)
-    # note (Wes): watch the parent for the whole lifetime, since a worker can block
-    # in a model load or a send to an orchestrator that no longer exists. The parent
-    # passes its pid because it may exit before this process first reads getppid.
-    served = asyncio.create_task(lifetime(socket, spec))
-    watchdog = asyncio.create_task(orphaned(parent_pid))
     try:
-        await asyncio.wait({served, watchdog}, return_when=asyncio.FIRST_COMPLETED)
-        if served.done():
-            return served.result()
-        else:
-            logger.error("The orchestrator exited; stopping the worker")
-            served.cancel()
-            await asyncio.gather(served, return_exceptions=True)
-            return 1
+        return await lifetime(socket, backend, load_error)
     finally:
-        watchdog.cancel()
         socket.close(linger=1000)
         context.term()
+
+
+def watch_parent(parent_pid: int) -> None:
+    """End this process once the orchestrator that started it has exited."""
+    while os.getppid() == parent_pid:
+        time.sleep(PARENT_POLL_INTERVAL_S)
+    logger.error("The orchestrator exited; stopping the worker")
+    # note (Wes): a worker can be blocked in a model load, a framework thread or
+    # a send to an orchestrator that no longer exists, so nothing short of
+    # exiting the process reliably stops it.
+    os._exit(1)  # noqa: leading-underscore  # stdlib name; exits without cleanup
 
 
 def main() -> None:
@@ -146,7 +148,20 @@ def main() -> None:
         level=logging.INFO,
         format=f"%(asctime)s [{spec.name}] %(levelname)s %(name)s: %(message)s",
     )
-    sys.exit(asyncio.run(run_worker(options.endpoint, spec, options.parent_pid)))
+    # The orchestrator passes its pid because it may exit before this process
+    # first reads getppid.
+    threading.Thread(
+        target=watch_parent, args=(options.parent_pid,), daemon=True
+    ).start()
+    backend: Backend | None = None
+    load_error: str | None = None
+    try:
+        backend = load_backend(spec)
+        backend.load()
+    except Exception:
+        backend = None
+        load_error = traceback.format_exc()
+    sys.exit(asyncio.run(run_worker(options.endpoint, backend, load_error)))
 
 
 if __name__ == "__main__":

@@ -66,11 +66,16 @@ class BackendSpec(BaseModel):
 class Backend(Protocol):
     """A model hosted in a worker process through one framework's library API.
 
-    The worker calls start once, then run concurrently for independent
-    requests, cancel for a request the orchestrator gave up on, and close at
-    shutdown. run returns the result shape of the backend's task: chat
-    {text, finish_reason}, transcription {text}, image {modality, image_b64}.
+    The worker calls load once on its main thread before its event loop
+    starts, since frameworks such as SGLang install signal handlers and own
+    their event loop. It then calls start once inside the loop, run
+    concurrently for independent requests, cancel for a request the
+    orchestrator gave up on, and close at shutdown. run returns the result
+    shape of the backend's task: chat {text, finish_reason}, transcription
+    {text}, image {modality, image_b64}.
     """
+
+    def load(self) -> None: ...
 
     async def start(self) -> None: ...
 

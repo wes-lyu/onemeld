@@ -96,11 +96,18 @@ async def test_worker_crash_fails_in_flight_steps(worker: WorkerClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_startup_failure_carries_the_worker_traceback() -> None:
-    client = WorkerClient(
-        spec_of("tests.unit_test.fixtures.echo_backend:FailingBackend")
-    )
-    with pytest.raises(WorkerError, match="scripted startup failure"):
+@pytest.mark.parametrize(
+    "backend, message",
+    [
+        ("FailingLoadBackend", "scripted load failure"),
+        ("FailingBackend", "scripted startup failure"),
+    ],
+)
+async def test_startup_failure_carries_the_worker_traceback(
+    backend: str, message: str
+) -> None:
+    client = WorkerClient(spec_of(f"tests.unit_test.fixtures.echo_backend:{backend}"))
+    with pytest.raises(WorkerError, match=message):
         await client.start()
     assert not client.healthy
     await client.close()
@@ -119,7 +126,7 @@ from onemeld.backends.base import BackendSpec
 from onemeld.backends.client import WorkerClient
 
 async def main():
-    spec = {spec_of(args={"block_start": True}).model_dump_json()!r}
+    spec = {spec_of(args={"block_load": True}).model_dump_json()!r}
     client = WorkerClient(BackendSpec.model_validate_json(spec))
     starting = asyncio.create_task(client.start())
     while client.process is None:

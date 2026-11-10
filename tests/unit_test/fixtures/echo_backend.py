@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import time
 
 from onemeld.backends.base import BackendSpec, StepResult
 from onemeld.composition.types import StepRequest
@@ -17,12 +18,13 @@ class EchoBackend:
         self.spec = spec
         self.cancelled: list[str] = []
 
-    async def start(self) -> None:
-        if self.spec.args.get("block_start") is True:
+    def load(self) -> None:
+        while self.spec.args.get("block_load") is True:
             # Stands in for a model load that outlives the orchestrator.
-            await asyncio.Event().wait()
-        else:
-            pass
+            time.sleep(1)
+
+    async def start(self) -> None:
+        pass
 
     async def run(self, request_id: str, request: StepRequest) -> StepResult:
         action = request.params.get("action")
@@ -57,3 +59,8 @@ class EchoBackend:
 class FailingBackend(EchoBackend):
     async def start(self) -> None:
         raise RuntimeError("scripted startup failure")
+
+
+class FailingLoadBackend(EchoBackend):
+    def load(self) -> None:
+        raise RuntimeError("scripted load failure")

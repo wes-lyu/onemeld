@@ -2,6 +2,8 @@
 
 OneMeld serves several specialist models behind one API and one model name. A request can ask for images and a comparison in the same turn. A planner describes the steps, and the serving runtime passes the actual results between the models that execute them.
 
+The name combines "one" with "meld", which means to fuse into a whole. Each model keeps its own strengths, and clients see a single service.
+
 OneMeld builds on [SGLang-Omni](https://github.com/sgl-project/sglang-omni). It reuses the UMM controller and native stage executors. The planner selects actions and dependencies from a deployment's configured capabilities. Stage bindings determine which model executes each action.
 
 Send text, inline images or short speech instructions to `/v1/chat/completions`. Each request gets a plan. The response contains the selected text and images, with optional streaming through server-sent events. Use `/v1/models` to discover the model name and `/health` to check the worker group.

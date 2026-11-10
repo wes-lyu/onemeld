@@ -12,21 +12,9 @@ from contextlib import AbstractContextManager, nullcontext
 import torch
 
 
-def supports_device_streams(device: torch.device) -> bool:
-    """The device types the omni audio paths stage through, which is narrower than
-    the ones that have streams: Ascend NPU has them but waits for its own
-    measurements."""
-    return device.type in {"cuda", "musa", "xpu"}
-
-
-def has_device_streams(device: torch.device) -> bool:
-    """Whether the backend provides streams; each caller chooses whether to use them."""
-    return supports_device_streams(device) or device.type == "npu"
-
-
 def device_guard(device: torch.device) -> AbstractContextManager[None]:
-    """Pin the calling thread to device, or do nothing off an accelerator."""
-    if has_device_streams(device):
+    """Pin the calling thread to device, or do nothing off CUDA."""
+    if device.type == "cuda":
         return torch.get_device_module(device).device(device)
     else:
         return nullcontext()
@@ -85,12 +73,6 @@ def resolve_concrete_device(
         return concrete
     else:
         pass
-    if concrete.type == "mps":
-        # note (lennox): Apple exposes one Metal device and torch.mps has no
-        # current_device(); see AppleOmniPlatform._validate_device_id.
-        return torch.device("mps", 0)
-    else:
-        pass
     # note (lennox): built from the resolved type directly -- the platform
     # object's get_device is NotImplemented on cpu-only hosts even when a
     # test legitimately pins device_type.
@@ -101,8 +83,6 @@ def resolve_concrete_device(
 
 __all__ = [
     "device_guard",
-    "has_device_streams",
     "resolve_concrete_device",
     "resolve_device_spec",
-    "supports_device_streams",
 ]

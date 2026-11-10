@@ -90,11 +90,11 @@ def parse_memory_bytes(field_name: str, value: int | str | None) -> int | None:
 
 
 class CommConfig(BaseModel):
-    """Per-stage communication buffer and Mooncake options.
+    """Per-stage communication buffer options.
 
     Transport selection is owned by ``CommRouter`` from stage locality and
-    placement. This config only tunes buffer pools and backend-specific
-    connection options for transports the router selects.
+    placement. This config only tunes buffer pools for the transports the
+    router selects.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -102,9 +102,6 @@ class CommConfig(BaseModel):
     credits: int = 2
     cuda_ipc_slot_size_kb: int = 64
     cuda_ipc_pool_size_mb: int | None = None
-    mooncake_protocol: str = "rdma"
-    mooncake_hostname: str | None = None
-    mooncake_device_name: str = ""
 
 
 class EndpointsConfig(BaseModel):
@@ -345,7 +342,7 @@ class StageConfig(BaseModel):
     )
     total_reserve_bytes: int | None = Field(
         default=None,
-        description="Per-replica total physical VRAM budget in bytes (weights, KV, activations); accepts an int or an exact binary-size string. Drives placement capacity checks and MPS preflight arithmetic, and unless enforce_total_reserve is false it is enforced at stage startup through a per-process torch allocator cap, so a stage that outgrows its budget fails itself instead of a co-tenant. The cap bounds torch allocations only; declared budgets need headroom above the measured model footprint.",
+        description="Per-replica total physical VRAM budget in bytes (weights, KV, activations); accepts an int or an exact binary-size string. Drives placement capacity checks, and unless enforce_total_reserve is false it is enforced at stage startup through a per-process torch allocator cap, so a stage that outgrows its budget fails itself instead of a co-tenant. The cap bounds torch allocations only; declared budgets need headroom above the measured model footprint.",
     )
     enforce_total_reserve: bool = True
 
@@ -528,7 +525,6 @@ class PipelineConfig(BaseModel):
     entry_stage: str | None = None
     processes: dict[str, ProcessConfig] = Field(default_factory=dict)
     env_defaults: dict[str, str] = Field(default_factory=dict)
-    mps: Literal["off", "on", "auto"] = "off"
     weight_share: Literal["off", "on"] = "off"
     placement: PlacementConfig = Field(default_factory=PlacementConfig)
     placement_policy: str | None = None

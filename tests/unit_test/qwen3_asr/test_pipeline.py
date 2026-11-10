@@ -242,42 +242,6 @@ def test_qwen3_asr_explicit_prefill_backend_overrides_rocm_default(
     assert overrides["prefill_attention_backend"] == "aiter"
 
 
-def test_qwen3_asr_torch_mps_uses_eager_native_profile() -> None:
-    builder = make_engine_builder()
-    builder.device = "mps"
-
-    defaults = builder.generation_defaults(dtype="float16")
-
-    assert defaults == {
-        "max_running_requests": 1,
-        "disable_cuda_graph": True,
-        "disable_overlap_schedule": True,
-        "disable_radix_cache": True,
-        "enable_torch_compile": False,
-        "context_length": 2048,
-        "max_total_tokens": 2048,
-        "max_prefill_tokens": 2048,
-        "chunked_prefill_size": -1,
-        "mem_fraction_static": None,
-        "attention_backend": "torch_native",
-        "mm_attention_backend": "sdpa",
-        "sampling_backend": "pytorch",
-        "dtype": "float16",
-    }
-
-
-def test_qwen3_asr_torch_mps_profile_overrides_typed_torch_compile_default() -> None:
-    builder = make_engine_builder()
-    builder.device = "mps"
-    overrides = {"enable_torch_compile": True}
-
-    defaults = builder.generation_defaults(dtype="auto")
-    builder.adjust_overrides(overrides)
-
-    assert defaults["enable_torch_compile"] is False
-    assert overrides["enable_torch_compile"] is False
-
-
 @pytest.mark.parametrize(
     ("batch_size", "wait_ms", "match"),
     [

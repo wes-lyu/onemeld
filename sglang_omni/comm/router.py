@@ -23,8 +23,7 @@ _CUDA_IPC_FALLBACK_WARNED: set[tuple[str, str, int | None, int | None, str]] = s
 class CommRouter:
     """Maps an edge to the physical mover and owns relay instances.
 
-    The router classifies locality. It does not define the stage protocol and it
-    does not expose Mooncake-specific handles to stage code.
+    The router classifies locality. It does not define the stage protocol.
     """
 
     def __init__(
@@ -36,7 +35,6 @@ class CommRouter:
         same_process_targets: set[str] | None,
         gpu_stage_names: set[str] | None,
         stage_gpu_ids: dict[str, tuple[int, ...]] | None = None,
-        remote_stage_names: set[str] | None = None,
         comm_config: Mapping[str, int | float | str | None] | None = None,
         injected_relay: Relay | None = None,
     ) -> None:
@@ -49,14 +47,12 @@ class CommRouter:
             name: tuple(int(gpu_id) for gpu_id in gpu_ids)
             for name, gpu_ids in (stage_gpu_ids or {}).items()
         }
-        self.remote_stage_names = set(remote_stage_names or ())
         self.direct_cuda_ipc_targets = frozenset(
             name
             for name, gpu_ids in self.stage_gpu_ids.items()
             if self.gpu_id == self.placement_gpu_id
             and gpu_ids == (self.placement_gpu_id,)
             and name not in self.same_process_targets
-            and name not in self.remote_stage_names
         )
         self.comm_config = dict(comm_config or {})
         self.injected_relay = injected_relay
@@ -220,10 +216,6 @@ class CommRouter:
         return self.note_transport("outbound", target, kind)
 
     def physical_outbound(self, target: str) -> TransportKind:
-        if target in self.remote_stage_names:
-            return TransportKind.MOONCAKE
-        else:
-            pass
         if self.self_is_gpu and target in self.gpu_stage_names:
             return self.intra_node_transport(target)
         else:
@@ -238,9 +230,7 @@ class CommRouter:
             )
         else:
             pass
-        if target in self.remote_stage_names:
-            kind = TransportKind.MOONCAKE
-        elif data.device.type != current_platform.device_type:
+        if data.device.type != current_platform.device_type:
             kind = TransportKind.SHM
         elif self.self_is_gpu and target in self.gpu_stage_names:
             kind = self.intra_node_transport(target)
@@ -252,9 +242,7 @@ class CommRouter:
         return self.note_transport("stream", target, kind)
 
     def inbound(self, from_stage: str) -> TransportKind:
-        if from_stage in self.remote_stage_names:
-            kind = TransportKind.MOONCAKE
-        elif self.self_is_gpu and from_stage in self.gpu_stage_names:
+        if self.self_is_gpu and from_stage in self.gpu_stage_names:
             kind = current_platform.get_intra_node_transport()
         else:
             kind = TransportKind.SHM
@@ -299,24 +287,21 @@ class CommRouter:
         return kind, self.relay(kind)
 
     def outbound_payload(self, target: str, payload: object) -> TransportKind:
-        if target in self.remote_stage_names:
-            kind = TransportKind.MOONCAKE
-        else:
-            devices = tensor_devices(getattr(payload, "data", payload))
-            if not devices or devices == {"cpu"}:
-                kind = TransportKind.SHM
-            elif current_platform.device_type in devices and devices <= {
-                "cpu",
-                current_platform.device_type,
-            }:
-                if self.self_is_gpu and target in self.gpu_stage_names:
-                    kind = self.intra_node_transport(target)
-                else:
-                    kind = TransportKind.SHM
+        devices = tensor_devices(getattr(payload, "data", payload))
+        if not devices or devices == {"cpu"}:
+            kind = TransportKind.SHM
+        elif current_platform.device_type in devices and devices <= {
+            "cpu",
+            current_platform.device_type,
+        }:
+            if self.self_is_gpu and target in self.gpu_stage_names:
+                kind = self.intra_node_transport(target)
             else:
-                raise ValueError(
-                    f"mixed or unsupported tensor devices in payload: {devices}"
-                )
+                kind = TransportKind.SHM
+        else:
+            raise ValueError(
+                f"mixed or unsupported tensor devices in payload: {devices}"
+            )
         return self.note_transport("payload", target, kind)
 
     def relay_for_stream(
@@ -366,34 +351,6 @@ class CommRouter:
             )
         else:
             pass
-        if kind is TransportKind.MOONCAKE:
-            if self.gpu_id is not None and not current_platform.is_cuda_alike():
-                raise NotImplementedError(
-                    f"cross-node transfer from {self.stage_name!r} needs a mooncake "
-                    f"relay, which is built on a literal cuda device; "
-                    f"{current_platform.device_type} is not supported yet"
-                )
-            else:
-                pass
-            device = f"cuda:{self.gpu_id}" if self.gpu_id is not None else "cpu"
-            return create_relay(
-                "mooncake",
-                engine_id=engine_id,
-                device=device,
-                slot_size_mb=slot_size_mb,
-                credits=credits,
-                protocol=(
-                    cfg["mooncake_protocol"] if "mooncake_protocol" in cfg else "rdma"
-                ),
-                hostname=(
-                    cfg["mooncake_hostname"] if "mooncake_hostname" in cfg else None
-                ),
-                device_name=(
-                    cfg["mooncake_device_name"] if "mooncake_device_name" in cfg else ""
-                ),
-            )
-        else:
-            pass
         if kind is TransportKind.SHM:
             return create_relay(
                 "shm",
@@ -438,7 +395,7 @@ def tensor_devices(obj: object, seen: set[int] | None = None) -> set[str]:
         pass
     seen.add(obj_id)
     if isinstance(obj, torch.Tensor):
-        if obj.device.type in ("cpu", "musa"):
+        if obj.device.type == "cpu":
             return {obj.device.type}
         else:
             pass

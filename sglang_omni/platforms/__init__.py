@@ -4,14 +4,8 @@ import pkgutil
 from sglang.srt import platforms as srt_platforms
 from sglang.srt.platforms.interface import SRTPlatform
 
-from sglang_omni.platforms.apple import AppleOmniPlatform
-from sglang_omni.platforms.cpu import CPUOmniPlatform
 from sglang_omni.platforms.cuda import CUDAOmniPlatform
 from sglang_omni.platforms.interface import OmniPlatform
-from sglang_omni.platforms.musa import MUSAOmniPlatform
-from sglang_omni.platforms.npu import NPUOmniPlatform
-from sglang_omni.platforms.rocm import ROCMOmniPlatform
-from sglang_omni.platforms.xpu import XPUOmniPlatform
 
 
 def load_platform_class(qualname: str) -> type[OmniPlatform]:
@@ -38,30 +32,6 @@ def load_platform_class(qualname: str) -> type[OmniPlatform]:
 def as_omni_platform(platform: SRTPlatform) -> OmniPlatform:
     if platform.is_cuda():
         return CUDAOmniPlatform()
-    else:
-        pass
-    if platform.is_rocm():
-        return ROCMOmniPlatform()
-    else:
-        pass
-    if platform.is_cpu():
-        return CPUOmniPlatform()
-    else:
-        pass
-    if platform.is_xpu():
-        return XPUOmniPlatform()
-    else:
-        pass
-    if platform.is_npu():
-        return NPUOmniPlatform()
-    else:
-        pass
-    if platform.is_mps():
-        return AppleOmniPlatform()
-    else:
-        pass
-    if platform.is_musa():
-        return MUSAOmniPlatform()
     else:
         pass
     qualname = f"{type(platform).__module__}.{type(platform).__qualname__}"

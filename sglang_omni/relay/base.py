@@ -20,8 +20,8 @@ def register_relay(name: str):
     Decorator to register a Relay subclass in the global registry.
 
     Usage:
-        @register_relay("nccl")
-        class NcclRelay(Relay): ...
+        @register_relay("shm")
+        class ShmRelay(Relay): ...
     """
 
     def decorator(cls):
@@ -45,16 +45,10 @@ def create_relay(relay_type: str, **kwargs) -> Relay:
     if relay_type not in RELAY_REGISTRY:
         # Try dynamic import to trigger registration
         try:
-            if relay_type == "nccl":
-                from .nccl import NcclRelay  # noqa: F401 - Register backend.
-            elif relay_type == "cuda_ipc":
+            if relay_type == "cuda_ipc":
                 from .cuda_ipc import CudaIpcRelay  # noqa: F401 - Register backend.
             elif relay_type == "shm":
                 from .shm import ShmRelay  # noqa: F401 - Register backend.
-            elif relay_type == "nixl":
-                from .nixl import NixlRelay  # noqa: F401 - Register backend.
-            elif relay_type == "mooncake":
-                from .mooncake import MooncakeRelay  # noqa: F401 - Register backend.
             else:
                 pass
         except ImportError:

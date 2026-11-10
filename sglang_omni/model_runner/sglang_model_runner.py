@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import functools
 import logging
@@ -562,14 +561,7 @@ class SGLModelRunner(ModelRunner):
         get_flags().capture.enable_torch_compile = get_exec().graph.enable_torch_compile
         install_prefill_runner_dispatch()
 
-        from sglang_omni.platforms import current_platform
-
-        with contextlib.ExitStack() as pins:
-            if current_platform.is_xpu():
-                pins.enter_context(current_platform.graph_capture_attention())
-            else:
-                pass
-            result = super().init_cuda_graphs(capture_decode_cuda_graph)
+        result = super().init_cuda_graphs(capture_decode_cuda_graph)
         if self.token_to_kv_pool.post_capture_active:
             self.post_capture_resize_kv_pool()
         else:

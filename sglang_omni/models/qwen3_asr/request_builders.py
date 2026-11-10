@@ -155,7 +155,6 @@ def make_qwen3_asr_scheduler_adapters(
     context_length: int | None = None,
     audio_encoder_service: Qwen3ASRPreLMEncoderService | None = None,
     should_wait_for_encode: Callable[[], bool] | None = None,
-    greedy_only: bool = False,
 ) -> tuple[
     Callable[
         [StagePayload], Qwen3ASRRequestData | DeferredAdmission[Qwen3ASRRequestData]
@@ -253,13 +252,6 @@ def make_qwen3_asr_scheduler_adapters(
             else ([], "")
         )
         temperature = float(params.get("temperature") or 0.0)
-        if greedy_only and temperature != 0.0:
-            raise ValueError(
-                "Qwen3-ASR Apple backend currently supports only greedy decoding; "
-                "set temperature=0"
-            )
-        else:
-            pass
         language = params.get("language")
         requested_language = None if language is None else str(language)
         forced_language = (

@@ -447,8 +447,7 @@ async def test_mp_runner_stop_cleans_runtime_dir(
         def dead_summary(self) -> str:
             return "(none)"
 
-        async def shutdown(self, before_signal=None) -> None:
-            del before_signal
+        async def shutdown(self) -> None:
             self.shutdown_called = True
 
     group = FakeGroup()

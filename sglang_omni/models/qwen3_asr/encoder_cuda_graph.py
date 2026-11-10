@@ -17,9 +17,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-from sglang.srt.layers.attention.vision import VisionAttentionMetadata
 
-from sglang_omni.platforms import current_platform
 from sglang_omni.platforms.device_graph import DeviceGraphBackend, ReplayableGraph
 
 if TYPE_CHECKING:
@@ -66,7 +64,6 @@ class CapturedGraph:
     graph: ReplayableGraph  # the accelerator's graph type, named per backend
     hidden_states: torch.Tensor  # [bucket, hidden] static input
     cu_seqlens: torch.Tensor  # [max_windows + 1] static window boundaries
-    attention_metadata: VisionAttentionMetadata | None
     output: torch.Tensor  # [bucket, output_dim] static result
 
 
@@ -105,7 +102,6 @@ class Qwen3ASREncoderLayerStackGraphRunner:
         self.buckets = buckets[:-1] + (top + self.max_windows_for(top),)
         self.graphs: dict[int, CapturedGraph] = {}  # bucket size -> recorded graph
         self.failed: set[int] = set()
-        self.capture_attention_metadata: VisionAttentionMetadata | None = None
 
     @property
     def tokens_per_window(self) -> int:
@@ -138,11 +134,7 @@ class Qwen3ASREncoderLayerStackGraphRunner:
         for layer in tower.layers:
             residual = h
             h = layer.self_attn_layer_norm(h)
-            attention_kwargs = dict(
-                max_seqlen=self.max_seqlen,
-                forward_metadata=self.capture_attention_metadata,
-            )
-            h = layer.self_attn(x=h, cu_seqlens=cu_seqlens, **attention_kwargs)
+            h = layer.self_attn(x=h, cu_seqlens=cu_seqlens, max_seqlen=self.max_seqlen)
             h = residual + h
             residual = h
             h = layer.final_layer_norm(h)
@@ -155,30 +147,14 @@ class Qwen3ASREncoderLayerStackGraphRunner:
         h = tower.act(h)
         return tower.proj2(h)[0]
 
-    def capture_boundaries(
-        self, bucket_size: int
-    ) -> tuple[torch.Tensor, VisionAttentionMetadata | None]:
+    def capture_boundaries(self, bucket_size: int) -> torch.Tensor:
         max_windows = self.max_windows_for(bucket_size)
         base, rem = divmod(bucket_size, max_windows)
         sizes = [base + 1] * rem + [base] * (max_windows - rem)
         bounds = [0]
         for size in sizes:
             bounds.append(bounds[-1] + size)
-        static_cu = torch.tensor(bounds, dtype=torch.int32, device=self.device)
-        attention_metadata = None
-        if current_platform.is_rocm():
-            # VisionAiterAttention otherwise recomputes max_seqlen with
-            # seq_lens.max().item() inside the captured region. The device-to-host
-            # sync is illegal during HIP graph capture. Keep the mutable tensor
-            # metadata static and supply the architectural maximum as a host scalar.
-            attention_metadata = VisionAttentionMetadata(
-                cu_seqlens=static_cu,
-                seq_lens=static_cu[1:] - static_cu[:-1],
-                max_seqlen=self.max_seqlen,
-            )
-        else:
-            pass
-        return static_cu, attention_metadata
+        return torch.tensor(bounds, dtype=torch.int32, device=self.device)
 
     def capture(self, bucket_size: int) -> CapturedGraph:
         """Record one graph for a bucket-sized packed input."""
@@ -186,9 +162,8 @@ class Qwen3ASREncoderLayerStackGraphRunner:
         d_model = self.tower.ln_post.normalized_shape[0]
         static_hs = torch.zeros(bucket_size, d_model, device=device, dtype=dtype)
 
-        static_cu, attention_metadata = self.capture_boundaries(bucket_size)
+        static_cu = self.capture_boundaries(bucket_size)
         max_windows = static_cu.numel() - 1
-        self.capture_attention_metadata = attention_metadata
 
         def run_once() -> torch.Tensor:
             with torch.no_grad():
@@ -214,7 +189,6 @@ class Qwen3ASREncoderLayerStackGraphRunner:
             graph=graph,
             hidden_states=static_hs,
             cu_seqlens=static_cu,
-            attention_metadata=attention_metadata,
             output=static_out,
         )
 
@@ -286,10 +260,6 @@ class Qwen3ASREncoderLayerStackGraphRunner:
 
     def replay(self, entry: CapturedGraph, cu: torch.Tensor) -> None:
         entry.cu_seqlens.copy_(cu, non_blocking=True)
-        if entry.attention_metadata is not None:
-            entry.attention_metadata.seq_lens.copy_(cu[1:] - cu[:-1], non_blocking=True)
-        else:
-            pass
         entry.graph.replay()
 
     def plan(self, total: int, real_windows: int) -> tuple[int, list[int]] | None:

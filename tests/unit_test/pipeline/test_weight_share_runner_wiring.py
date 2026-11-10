@@ -164,11 +164,7 @@ class FakeGroup:
     def dead_summary(self) -> str:
         return f"{self.group_name} exited"
 
-    def process_start_attempts(self) -> set[str]:
-        return {self.group_name} if self.processes else set()
-
-    async def shutdown(self, before_signal=None) -> None:
-        del before_signal
+    async def shutdown(self) -> None:
         self.events.append(f"shutdown {self.group_name}")
 
     def close_control_channels(self) -> None:
@@ -301,10 +297,10 @@ async def test_a_replica_alone_on_its_gpu_still_gets_spawned(
 
 
 @pytest.mark.asyncio
-async def test_cancelling_startup_without_mps_still_reaps_the_children(
+async def test_cancelling_startup_still_reaps_the_children(
     tmp_path, monkeypatch
 ) -> None:
-    """Cancellation is a BaseException; cleanup must not hang off MPS."""
+    """Cancellation is a BaseException; cleanup must still run."""
     events: list[str] = []
     leader = FakeGroup(events, "gen@r0", ready_error=asyncio.CancelledError())
     follower = FakeGroup(events, "gen@r1")
@@ -337,52 +333,6 @@ async def test_roles_and_the_compat_flag_reach_the_spawn_environment(
         assert env["gen@r0"][ENV_WEIGHT_SHARE_COMPAT] == "1"
         assert env["gen@r1"][ENV_WEIGHT_SHARE_COMPAT] == "1"
         assert follower.spawn_env is env
-    finally:
-        await runner.stop()
-
-
-@pytest.mark.asyncio
-async def test_mps_environment_survives_the_weight_share_merge(
-    tmp_path, monkeypatch
-) -> None:
-    events: list[str] = []
-    leader = FakeGroup(events, "gen@r0")
-    follower = FakeGroup(events, "gen@r1")
-    patch(monkeypatch, events, [leader, follower])
-
-    class FakeMps:
-        has_leases = False
-
-        async def start(self) -> None:
-            events.append("MPS acquire")
-
-        def env_for_process(self, process_name: str) -> dict[str, str]:
-            return {"CUDA_MPS_PIPE_DIRECTORY": f"/tmp/pipe/{process_name}"}
-
-        async def verify(self) -> None:
-            events.append("MPS verify")
-
-        async def probe_failures(self) -> dict[str, str]:
-            return {}
-
-        async def retire_process_clients(self, process_name: str) -> set:
-            return set()
-
-        async def close(self, *, process_start_attempts=None) -> None:
-            del process_start_attempts
-            events.append("MPS close")
-
-    monkeypatch.setattr(mp_runner, "create_for_pipeline", lambda mode, specs: FakeMps())
-    config = make_config(tmp_path)
-    config.mps = "on"
-    runner = MultiProcessPipelineRunner(config)
-
-    await runner.start(timeout=5.0)
-    try:
-        env = leader.spawn_env
-        assert env["gen@r0"]["CUDA_MPS_PIPE_DIRECTORY"] == "/tmp/pipe/gen@r0"
-        assert env["gen@r0"][ENV_WEIGHT_SHARE].startswith("leader:")
-        assert env["gen@r0"][ENV_WEIGHT_SHARE_COMPAT] == "1"
     finally:
         await runner.stop()
 

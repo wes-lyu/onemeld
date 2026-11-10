@@ -26,7 +26,6 @@ from sglang_omni.config.runtime import (
 )
 from sglang_omni.config.schema import PipelineConfig, replica_instance_name
 from sglang_omni.config.topology import LogicalProcess, LogicalProcessPlan
-from sglang_omni.mps.decision import process_gpu_ids
 from sglang_omni.utils.ipc_weights import (
     ENV_WEIGHT_SHARE,
     ENV_WEIGHT_SHARE_COMPAT,
@@ -91,7 +90,19 @@ def plan_weight_share(
     reject_external_env(process_specs)
 
     gpu_ids_by_process = {
-        spec.process_name: process_gpu_ids(spec) for spec in process_specs
+        spec.process_name: {
+            int(gpu_id)
+            for stage_spec in spec.stage_specs
+            if (
+                gpu_id := (
+                    stage_spec.placement_gpu_id
+                    if stage_spec.placement_gpu_id is not None
+                    else stage_spec.gpu_id
+                )
+            )
+            is not None
+        }
+        for spec in process_specs
     }
     candidates = collect_candidate_groups(logical_process_plan, gpu_ids_by_process)
     if not candidates:

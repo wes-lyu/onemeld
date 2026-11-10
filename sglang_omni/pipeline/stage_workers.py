@@ -13,7 +13,7 @@ import re
 import sys
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping
+from collections.abc import Generator, Iterable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from multiprocessing.process import BaseProcess
@@ -128,8 +128,6 @@ class StageLaunchConfig:
     # GPU-resident stage names (for the transport router to pick GPU vs host transport).
     gpu_stage_names: set[str] = field(default_factory=set)
     stage_gpu_ids: dict[str, tuple[int, ...]] = field(default_factory=dict)
-    # Explicit cross-node stage names. These edges use Mooncake when present.
-    remote_stage_names: set[str] = field(default_factory=set)
     is_stream_receiver: bool = False
     can_accept_stream_before_payload: bool = False
     disable_direct_cuda_ipc_payload: bool = False
@@ -356,9 +354,6 @@ class StageGroup:
         self.ready_events: list[Event] = []
         self.startup_error_channels: list[Queue[str]] = []
         self.startup_progress: list[Synchronized] = []
-        self._process_start_attempts: set[str] = (
-            set()
-        )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
 
     @property
     def process_count(self) -> int:
@@ -400,12 +395,6 @@ class StageGroup:
             self._processes
         )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
 
-    def process_start_attempts(self) -> set[str]:
-        """Return process names whose ``Process.start()`` was called."""
-        return set(
-            self._process_start_attempts
-        )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
-
     def spawn(
         self,
         ctx: multiprocessing.context.SpawnContext,
@@ -437,9 +426,6 @@ class StageGroup:
                     else None
                 )
                 with patched_spawn_env(spec, extra_env=extra_env), spawn_affinity(spec):
-                    self._process_start_attempts.add(
-                        spec.process_name
-                    )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
                     proc.start()
             except Exception:
                 close_queue(startup_error_channel)
@@ -603,11 +589,12 @@ class StageGroup:
     async def shutdown(
         self,
         join_timeout: float = 30.0,
-        before_signal: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         try:
-            for spec, p in zip(
-                self.process_specs, self._processes
+            for (
+                p
+            ) in (
+                self._processes
             ):  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
                 p.join(timeout=join_timeout)
                 if p.is_alive():
@@ -616,10 +603,6 @@ class StageGroup:
                         p.name,
                         p.pid,
                     )
-                    if before_signal is not None:
-                        await before_signal(spec.process_name)
-                    else:
-                        pass
                     p.terminate()
                     p.join(timeout=5)
                     if p.is_alive():
@@ -1156,7 +1139,6 @@ def construct_stage(
         get_stream_done_targets=get_stream_done_targets,
         gpu_stage_names=spec.gpu_stage_names or None,
         stage_gpu_ids=spec.stage_gpu_ids or None,
-        remote_stage_names=spec.remote_stage_names or None,
         same_process_targets=spec.same_process_targets or None,
         local_dispatcher=local_dispatcher,
         can_accept_stream_before_payload=spec.can_accept_stream_before_payload,

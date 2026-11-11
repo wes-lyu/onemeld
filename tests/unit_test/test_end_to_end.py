@@ -13,8 +13,7 @@ from onemeld.server import create_app
 EXAMPLES = Path(__file__).parents[2] / "examples" / "onemeld"
 SCRIPTED = "tests.unit_test.fixtures.scripted_backends"
 ADAPTERS = {
-    "planning": "PlannerBackend",
-    "understanding": "JudgeBackend",
+    "understanding": "VisionBackend",
     "generation": "PainterBackend",
     "asr": "ListenerBackend",
 }

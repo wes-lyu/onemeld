@@ -1,30 +1,19 @@
 # The serve.yaml profile with speech transcription on an SGLang-Omni pipeline.
-# Install: uv pip install -e ".[sglang,sglang-omni]"
+# Install: uv pip install -e ".[sglang-omni]"
+#
+# Backends sharing a GPU start in the order listed. Each SGLang engine sizes
+# itself from the memory free when it starts, so the small engines go first
+# and SenseNova, which offloads its encoders and VAE to CPU on its own, last.
 model_name: onemeld
 
 backends:
-  planning:
-    framework: sglang
-    task: chat
-    model: Qwen/Qwen3.5-4B
-    gpu: 0
-    args:
-      mem_fraction_static: 0.23
-      max_total_tokens: 4096
-      context_length: 8192
-      max_running_requests: 2
-      chunked_prefill_size: 256
-      disable_overlap_schedule: true
-      attention_backend: triton
-      disable_cuda_graph: true
-      max_mamba_cache_size: 32
   understanding:
     framework: sglang
     task: chat
     model: Qwen/Qwen3-VL-4B-Instruct
     gpu: 0
     args:
-      mem_fraction_static: 0.22
+      mem_fraction_static: 0.19
       max_total_tokens: 4096
       context_length: 8192
       max_running_requests: 4
@@ -32,22 +21,20 @@ backends:
       disable_overlap_schedule: true
       attention_backend: triton
       disable_cuda_graph: true
-  generation:
-    framework: sglang
-    task: image
-    model: sensenova/SenseNova-U1.5-8B-MoT
-    gpu: 0
-    env:
-      # SGLang-Omni provides the SenseNova diffusion pipeline.
-      SGLANG_EXTERNAL_MODEL_PACKAGE: sglang_omni.models.sensenova_u1.native
   asr:
     framework: sglang_omni
     task: transcription
     model: Qwen/Qwen3-ASR-0.6B
     gpu: 0
+  generation:
+    framework: sglang
+    task: image
+    model: sensenova/SenseNova-U1.5-8B-MoT
+    gpu: 0
 
 composition:
-  planner_stage: planning
+  # The vision model also plans, which leaves room for SenseNova's DiT.
+  planner_stage: understanding
   capabilities:
     respond:
       stages: [understanding]

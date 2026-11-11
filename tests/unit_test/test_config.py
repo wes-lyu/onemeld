@@ -25,7 +25,7 @@ def profile() -> Profile:
 @pytest.mark.parametrize("name", ["serve.yaml", "sglang_omni.yaml"])
 def test_example_profiles_load(name: str) -> None:
     config = load_config(EXAMPLES / name)
-    assert set(config.backends) == {"planning", "understanding", "generation", "asr"}
+    assert list(config.backends) == ["understanding", "asr", "generation"]
     assert all(name == spec.name for name, spec in config.backends.items())
     assert config.request_limits.max_dispatches == 9
 
@@ -55,7 +55,9 @@ def test_a_new_framework_plugs_in_through_its_adapter_path() -> None:
             "needs a image backend, but 'generation' is a chat backend",
         ),
         (
-            lambda values: values["backends"]["planning"].update(task="transcription"),
+            lambda values: values["backends"]["understanding"].update(
+                task="transcription"
+            ),
             "must be a chat backend",
         ),
         (

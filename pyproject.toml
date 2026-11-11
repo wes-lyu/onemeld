@@ -28,8 +28,8 @@ sglang = [
     "sglang==0.5.23; sys_platform == 'linux'",
     "torch==2.14.1",
 ]
-# note (Wes): SenseNova's SGLang pipeline is on SGLang-Omni's main branch and in
-# no release yet; pin a commit once one is verified on a GPU host.
+# note (Wes): tested with SGLang-Omni main at 7190291 and sglang 0.5.23; pin a
+# commit once an SGLang-Omni pipeline is verified through OneMeld on a GPU host.
 sglang-omni = [
     "numpy>=1.24.0",
     "sglang==0.5.23; sys_platform == 'linux'",

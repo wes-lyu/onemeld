@@ -10,13 +10,13 @@ Send text, inline images or short speech instructions to `/v1/chat/completions`.
 
 ## Run the first example
 
-The [example profile](examples/onemeld/serve.yaml) runs four models with SGLang on one Linux CUDA GPU: Qwen3.5-4B plans, Qwen3-VL-4B-Instruct answers text and visual tasks, SenseNova-U1.5-8B-MoT generates images, and Qwen3-ASR-0.6B transcribes spoken instructions. SenseNova's pipeline comes from SGLang-Omni. The memory split in the profile has not been checked on hardware yet. If the image backend runs out of memory, give it a second GPU with `gpu: 1`.
+The [example profile](examples/onemeld/serve.yaml) runs three models with SGLang on one 48 GB Linux CUDA GPU, and has been run on an RTX 4090: Qwen3-VL-4B-Instruct plans and answers text and visual tasks, SenseNova-U1.5-8B-MoT generates images, and Qwen3-ASR-0.6B transcribes spoken instructions. SenseNova keeps its DiT on the GPU and offloads its encoders and VAE to CPU on its own, which leaves no room for a separate planner model on that card. With a second GPU, add a dedicated planner backend there and point `composition.planner_stage` at it.
 
 From the repository root, install into a fresh Python 3.12 environment:
 
 ```bash
 uv venv --python 3.12
-uv pip install --prerelease=allow -e ".[sglang-omni]"
+uv pip install --prerelease=allow -e ".[sglang]"
 .venv/bin/onemeld serve --config examples/onemeld/serve.yaml --host 127.0.0.1 --port 8897
 ```
 
@@ -32,11 +32,11 @@ curl -fsS http://127.0.0.1:8897/v1/chat/completions \
 jq -r '.choices[0].message.segments[].kind' response.json
 ```
 
-The request asks for two cat photos and a recommendation based on clarity, subject completeness and composition. A successful response contains two image segments and a text segment. The server log includes the accepted plan and each dispatch under `UMM composition trace`, keyed by the response segments' `execution_id`.
+The request asks for two cat photos and a recommendation based on clarity, subject completeness and composition. A successful response contains two image segments and a text segment; on the RTX 4090 it took about 23 seconds. The server log includes the accepted plan and each dispatch under `UMM composition trace`, keyed by the response segments' `execution_id`.
 
 ## Mix frameworks
 
-[sglang_omni.yaml](examples/onemeld/sglang_omni.yaml) is the same profile with speech transcription on an SGLang-Omni pipeline instead of SGLang. A backend whose framework needs its own environment names that environment's interpreter:
+[sglang_omni.yaml](examples/onemeld/sglang_omni.yaml) is the same profile with speech transcription on an SGLang-Omni pipeline instead of SGLang. Unlike serve.yaml, it has not been run on a GPU yet. A backend whose framework needs its own environment names that environment's interpreter:
 
 ```yaml
 backends:

@@ -17,12 +17,11 @@ Each backend is one model in one worker process. Its `framework` and `task` sele
 
 | Backend | Framework | Role in the example |
 | --- | --- | --- |
-| `planning` | SGLang | Qwen3.5-4B produces the upfront plan. |
-| `understanding` | SGLang | Qwen3-VL-4B-Instruct answers text tasks and compares referenced images. |
-| `generation` | SGLang, with SGLang-Omni's SenseNova pipeline | SenseNova-U1.5-8B-MoT returns one image per step. |
+| `understanding` | SGLang | Qwen3-VL-4B-Instruct produces the upfront plan, answers text tasks and compares referenced images. |
 | `asr` | SGLang | Qwen3-ASR-0.6B transcribes short audio instructions. |
+| `generation` | SGLang | SenseNova-U1.5-8B-MoT returns one image per step. |
 
-A backend's `args` go to its framework unchanged, for example SGLang `Engine` arguments such as `mem_fraction_static`. `gpu` sets the worker's `CUDA_VISIBLE_DEVICES`, `env` adds environment variables, and `python` names the interpreter of the environment that has the framework installed.
+A backend's `args` go to its framework unchanged, for example SGLang `Engine` arguments such as `mem_fraction_static`. `gpu` sets the worker's `CUDA_VISIBLE_DEVICES`, `env` adds environment variables, and `python` names the interpreter of the environment that has the framework installed. Backends on different GPUs start together, and backends sharing a GPU start one at a time in the order the profile lists them, because an SGLang engine sizes itself from the memory free when it starts.
 
 With `trace: true` the log records the accepted plan, each dispatch and each produced artifact. Use the returned segments' `execution_id` to find these entries. A structurally valid plan can still misinterpret the user's request.
 

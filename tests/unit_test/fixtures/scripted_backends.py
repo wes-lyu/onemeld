@@ -30,10 +30,16 @@ class ScriptedBackendBase:
         pass
 
 
-class PlannerBackend(ScriptedBackendBase):
-    """Plans two images and a comparison of them, all published."""
+class VisionBackend(ScriptedBackendBase):
+    """Plans two images and their comparison, then compares the images it is shown."""
 
     async def run(self, request_id: str, request: StepRequest) -> StepResult:
+        if "response_format" in request.params:
+            return self.plan()
+        else:
+            return self.compare(request)
+
+    def plan(self) -> StepResult:
         steps = [
             {
                 "id": f"cat_{index}",
@@ -55,18 +61,7 @@ class PlannerBackend(ScriptedBackendBase):
         )
         return {"text": json.dumps({"steps": steps}), "finish_reason": "stop"}
 
-
-class PainterBackend(ScriptedBackendBase):
-    async def run(self, request_id: str, request: StepRequest) -> StepResult:
-        color = COLORS[self.runs % len(COLORS)]
-        self.runs += 1
-        return image_result(Image.new("RGB", (16, 16), color))
-
-
-class JudgeBackend(ScriptedBackendBase):
-    """Counts the images it was shown."""
-
-    async def run(self, request_id: str, request: StepRequest) -> StepResult:
+    def compare(self, request: StepRequest) -> StepResult:
         assert isinstance(request.inputs, list)
         images = sum(
             part.get("type") == "image_url"
@@ -75,6 +70,13 @@ class JudgeBackend(ScriptedBackendBase):
             for part in message["content"]
         )
         return {"text": f"Compared {images} images", "finish_reason": "stop"}
+
+
+class PainterBackend(ScriptedBackendBase):
+    async def run(self, request_id: str, request: StepRequest) -> StepResult:
+        color = COLORS[self.runs % len(COLORS)]
+        self.runs += 1
+        return image_result(Image.new("RGB", (16, 16), color))
 
 
 class ListenerBackend(ScriptedBackendBase):

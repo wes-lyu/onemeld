@@ -92,7 +92,12 @@ class VisionBackend(ScriptedBackendBase):
             if isinstance(message.get("content"), list)
             for part in message["content"]
         )
-        return {"text": f"Compared {images} images", "finish_reason": "stop"}
+        scores = "\n".join(
+            f"Photo {index}: clarity {9 - index}/10, subject completeness 8/10, "
+            "composition 8/10"
+            for index in range(1, images + 1)
+        )
+        return {"text": f"{scores}\nRecommendation: Photo 1", "finish_reason": "stop"}
 
 
 class PainterBackend(ScriptedBackendBase):

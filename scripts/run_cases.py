@@ -11,13 +11,16 @@ Each case directory under --output holds the request, the response, each
 returned segment, a copy of the request's trace and report.json. summary.json
 lists every case. Checks cover the request's structure: one valid plan, intact
 hashes and references, steps that run as planned and feed each other, and the
-expected outputs. Whether an image or answer is good still needs a person.
+expected outputs. A case with scoring rules also reads each image's scores and the
+recommendation from the answer, and checks the recommendation follows the rules.
+Whether an image or answer is good beyond that still needs a person.
 """
 
 import argparse
 import base64
 import hashlib
 import json
+import re
 import shutil
 import sys
 import time
@@ -33,6 +36,55 @@ REQUEST_TIMEOUT_S = 900.0
 HEALTH_TIMEOUT_S = 600.0
 HEALTH_POLL_INTERVAL_S = 3.0
 Json = dict[str, JsonValue]
+RECOMMENDATION_WORDS = ("recommend", "推荐")
+IMAGE_LABEL = re.compile(
+    r"(?:photo|image|picture|照片|图片)\s*(step\s*\d+|\d+|[一二两])|第\s*([一二两\d])\s*张",
+    re.IGNORECASE,
+)
+CHINESE_DIGITS = {"一": "1", "二": "2", "两": "2"}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Scoring:
+    """What a scored comparison of generated images must state."""
+
+    image_count: int
+    # Each criterion maps to the names an answer may call it in any case language.
+    criteria: dict[str, list[str]]
+    tie_break: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ScoredAnswer:
+    """The scores and recommendation read from an answer, keyed by image label."""
+
+    scores: dict[str, dict[str, float]]
+    recommended_image: str | None
+
+    def is_complete(self, scoring: Scoring) -> bool:
+        return (
+            len(self.scores) == scoring.image_count
+            and all(
+                len(scores) == len(scoring.criteria) for scores in self.scores.values()
+            )
+            and self.recommended_image in self.scores
+        )
+
+    def best_images(self, scoring: Scoring) -> set[str]:
+        """The images the case's rule ranks first: highest total, then the tie-break criterion."""
+        totals = {image: sum(scores.values()) for image, scores in self.scores.items()}
+        leaders = [
+            image for image, total in totals.items() if total == max(totals.values())
+        ]
+        best_tie_break = max(self.scores[image][scoring.tie_break] for image in leaders)
+        return {
+            image
+            for image in leaders
+            if self.scores[image][scoring.tie_break] == best_tie_break
+        }
+
+    def as_json(self) -> Json:
+        return {"scores": self.scores, "recommended_image": self.recommended_image}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -43,6 +95,7 @@ class Case:
     prompt: str | None = None
     image: str | None = None
     audio: str | None = None
+    scoring: Scoring | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -65,6 +118,7 @@ class CaseReport:
     error: str | None = None
     integrity_errors: list[str] = field(default_factory=list)
     checks: dict[str, bool] = field(default_factory=dict)
+    scored_answer: ScoredAnswer | None = None
 
     @property
     def passed(self) -> bool:
@@ -86,7 +140,23 @@ class CaseReport:
             "error": self.error,
             "integrity_errors": self.integrity_errors,
             "checks": self.checks,
+            "scored_answer": (
+                self.scored_answer.as_json() if self.scored_answer is not None else None
+            ),
         }
+
+
+def load_scoring(values: Json | None) -> Scoring | None:
+    if values is None:
+        return None
+    elif values["tie_break"] not in values["criteria"]:
+        raise ValueError(f"Tie-break {values['tie_break']} is not a scoring criterion")
+    else:
+        return Scoring(
+            image_count=values["image_count"],
+            criteria=values["criteria"],
+            tie_break=values["tie_break"],
+        )
 
 
 def load_cases(path: Path) -> CaseFile:
@@ -104,6 +174,7 @@ def load_cases(path: Path) -> CaseFile:
                 prompt=case.get("prompt"),
                 image=case.get("image"),
                 audio=case.get("audio"),
+                scoring=load_scoring(case.get("scoring")),
             )
             for case in values["cases"]
         ],
@@ -192,6 +263,57 @@ def client_inputs(request: Json) -> dict[str, Json]:
     return inputs
 
 
+def image_labels(text: str) -> list[str]:
+    """Image labels in order of appearance, such as 1 for Photo 1 or step2 for Image step2."""
+    labels: list[str] = []
+    for match in IMAGE_LABEL.finditer(text):
+        label = re.sub(r"\s+", "", (match.group(1) or match.group(2)).lower())
+        labels.append(CHINESE_DIGITS.get(label, label))
+    return labels
+
+
+def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
+    """Each image's score per criterion, read up to the recommendation, and the image it names."""
+    lowered = text.lower()
+    recommendation_start = min(
+        (lowered.find(word) for word in RECOMMENDATION_WORDS if word in lowered),
+        default=len(lowered),
+    )
+    scores: dict[str, dict[str, float]] = {}
+    current_image: str | None = None
+    for line in lowered[:recommendation_start].splitlines():
+        positions = {
+            criterion: match
+            for criterion, names in scoring.criteria.items()
+            for name in names
+            if (
+                match := re.search(
+                    re.escape(name.lower()) + r"\W{0,12}(\d+(?:\.\d+)?)", line
+                )
+            )
+        }
+        first_criterion = min(
+            (match.start() for match in positions.values()), default=len(line)
+        )
+        # A label after the first criterion is a comparison, such as "softer than Photo 1".
+        labels = image_labels(line[:first_criterion])
+        if labels:
+            current_image = labels[0]
+        else:
+            pass
+        if current_image is not None:
+            for criterion, match in positions.items():
+                scores.setdefault(current_image, {}).setdefault(
+                    criterion, float(match.group(1))
+                )
+        else:
+            pass
+    recommended = image_labels(lowered[recommendation_start:])
+    return ScoredAnswer(
+        scores=scores, recommended_image=recommended[0] if recommended else None
+    )
+
+
 def check_integrity(
     trace: list[Json], plan: Json, artifacts: dict[str, Json], inputs: dict[str, Json]
 ) -> tuple[list[str], list[Json]]:
@@ -262,6 +384,8 @@ def contract_checks(
     dispatched: list[Json],
     kinds: list[str],
     published: list[str],
+    scoring: Scoring | None,
+    scored_answer: ScoredAnswer | None,
 ) -> dict[str, bool]:
     """Each named check on the dispatched steps and the published step IDs."""
     generations = [event for event in dispatched if event["action"] == "generate_image"]
@@ -285,6 +409,11 @@ def contract_checks(
         if reference["kind"] == "image"
     }
     (message,) = request["messages"]
+    is_scored = (
+        scoring is not None
+        and scored_answer is not None
+        and scored_answer.is_complete(scoring)
+    )
     available = {
         "text_result_drives_generation": len(generations) == 1
         and bool(response_ids & reads(generations[0])),
@@ -303,6 +432,9 @@ def contract_checks(
         ),
         "publishes_review_of_generated_images": bool(generation_ids)
         and any(generation_ids <= reads(event) for event in published_responses),
+        "states_scores_and_recommendation": is_scored,
+        "recommendation_follows_scores": is_scored
+        and scored_answer.recommended_image in scored_answer.best_images(scoring),
         "publishes_reference_description": any(
             "user_image_1" in reads(event) for event in published_responses
         ),
@@ -398,8 +530,22 @@ def run_case(
     else:
         pass
     report.integrity_errors = errors
+    if case.scoring is not None:
+        answer = "\n\n".join(
+            segment["data"] for segment in segments if segment["kind"] == "text"
+        )
+        report.scored_answer = read_scored_answer(answer, case.scoring)
+    else:
+        pass
     report.checks = contract_checks(
-        case.checks, request, trace, dispatched, report.segment_kinds, publish
+        case.checks,
+        request,
+        trace,
+        dispatched,
+        report.segment_kinds,
+        publish,
+        case.scoring,
+        report.scored_answer,
     )
     return report
 

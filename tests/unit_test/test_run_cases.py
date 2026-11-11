@@ -15,6 +15,7 @@ SCRIPT = Path(__file__).parents[2] / "scripts" / "run_cases.py"
 spec = importlib.util.spec_from_file_location("run_cases", SCRIPT)
 run_cases = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(run_cases)
+CASES = {case.id: case for case in run_cases.load_cases(run_cases.DEFAULT_CASES).cases}
 
 
 @pytest.fixture(scope="module")
@@ -43,6 +44,8 @@ def test_a_matching_plan_passes_with_every_output_saved(
         "two_images_generated_and_viewed": True,
         "publishes_two_images": True,
         "publishes_review_of_generated_images": True,
+        "states_scores_and_recommendation": True,
+        "recommendation_follows_scores": True,
     }
     directory = f4["directory"]
     assert {path.name for path in directory.glob("segment_*")} == {
@@ -71,13 +74,14 @@ def test_a_voice_request_is_transcribed_once_before_planning(
         "two_images_generated_and_viewed": True,
         "publishes_two_images": True,
         "publishes_review_of_generated_images": True,
+        "states_scores_and_recommendation": True,
+        "recommendation_follows_scores": True,
     }
 
 
-def test_two_images_without_their_scores_fail_the_review_check(
-    reports: dict[str, dict]
-) -> None:
+def test_two_images_without_their_scores_fail(reports: dict[str, dict]) -> None:
     """F4's steps all ran, but only the two images reached the client."""
+    case = CASES["F4"]
     trace = reports["F4"]["directory"] / "trace"
     events = [
         json.loads(line) for line in (trace / "events.jsonl").read_text().splitlines()
@@ -85,22 +89,112 @@ def test_two_images_without_their_scores_fail_the_review_check(
     request = json.loads((reports["F4"]["directory"] / "request.json").read_text())
     dispatched = [event for event in events if event["event"] == "dispatch"]
     checks = run_cases.contract_checks(
-        [
-            "two_images_generated_and_viewed",
-            "publishes_two_images",
-            "publishes_review_of_generated_images",
-        ],
+        case.checks,
         request,
         events,
         dispatched,
         ["image", "image"],
         ["cat_0", "cat_1"],
+        case.scoring,
+        run_cases.read_scored_answer("", case.scoring),
     )
     assert checks == {
         "two_images_generated_and_viewed": True,
         "publishes_two_images": True,
         "publishes_review_of_generated_images": False,
+        "states_scores_and_recommendation": False,
+        "recommendation_follows_scores": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("answer", "scores", "recommended_image"),
+    [
+        (
+            "**Photo 1 Score:**\n- **Clarity:** 9/10\n- **Subject Completeness:** 8/10\n"
+            "- **Composition:** 8/10\n\n**Photo 2 Score:**\n"
+            "- **Clarity:** 8/10 — softer than Photo 1\n"
+            "- **Subject Completeness:** 9/10 — but the composition is busy\n"
+            "- **Composition:** 9/10\n\n**Recommendation: Photo 2**\n"
+            "Photo 2 wins on completeness (9/10 vs. 8/10).",
+            {"1": (9, 8, 8), "2": (8, 9, 9)},
+            "2",
+        ),
+        (
+            "照片1评分：\n- 清晰度：9分\n- 主体完整性：9分\n- 构图：8分\n\n"
+            "照片2评分：\n- 清晰度：6分\n- 主体完整性：7分\n- 构图：7分\n\n"
+            "推荐照片1，理由：照片1在清晰度上明显更高。",
+            {"1": (9, 9, 8), "2": (6, 7, 7)},
+            "1",
+        ),
+        (
+            "**Image step1:** Clarity: 9/10, Subject Completeness: 8/10, "
+            "Composition: 8/10\n**Image step2:** Clarity: 9/10, "
+            "Subject Completeness: 9/10, Composition: 8/10\n"
+            "**Recommendation: Image step2**",
+            {"step1": (9, 8, 8), "step2": (9, 9, 8)},
+            "step2",
+        ),
+    ],
+)
+def test_a_scored_answer_is_read_per_image_and_criterion(
+    answer: str, scores: dict[str, tuple[int, int, int]], recommended_image: str
+) -> None:
+    scoring = CASES["F4"].scoring
+    scored_answer = run_cases.read_scored_answer(answer, scoring)
+    assert scored_answer.scores == {
+        image: dict(zip(scoring.criteria, values)) for image, values in scores.items()
+    }
+    assert scored_answer.recommended_image == recommended_image
+    assert scored_answer.is_complete(scoring)
+
+
+@pytest.mark.parametrize(
+    ("answer", "is_complete", "follows_scores"),
+    [
+        (
+            "Photo 1: clarity 9, subject completeness 8, composition 8\n"
+            "Photo 2: clarity 7, subject completeness 9, composition 9\n"
+            "I recommend Photo 1.",
+            True,
+            True,
+        ),
+        # A tie on total goes to the clearer photo.
+        (
+            "Photo 1: clarity 9, subject completeness 8, composition 8\n"
+            "Photo 2: clarity 7, subject completeness 9, composition 9\n"
+            "I recommend Photo 2.",
+            True,
+            False,
+        ),
+        (
+            "Photo 1: clarity 9, subject completeness 8, composition 8\n"
+            "Photo 2: clarity 7, subject completeness 9, composition 9",
+            False,
+            False,
+        ),
+        (
+            "Photo 1: clarity 9, subject completeness 8\n"
+            "Photo 2: clarity 7, subject completeness 9, composition 9\n"
+            "I recommend Photo 2.",
+            False,
+            False,
+        ),
+        ("Both photos look great. I recommend Photo 1.", False, False),
+    ],
+)
+def test_the_recommendation_must_follow_complete_scores(
+    answer: str, is_complete: bool, follows_scores: bool
+) -> None:
+    scoring = CASES["F4"].scoring
+    scored_answer = run_cases.read_scored_answer(answer, scoring)
+    assert scored_answer.is_complete(scoring) is is_complete
+    if is_complete:
+        assert (
+            scored_answer.recommended_image in scored_answer.best_images(scoring)
+        ) is follows_scores
+    else:
+        assert not follows_scores
 
 
 def test_a_plan_that_breaks_the_request_fails_its_check(

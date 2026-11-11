@@ -21,5 +21,8 @@ def test_compare_cats_request_runs_through_worker_processes() -> None:
         "image",
         "text",
     ]
-    assert message["content"] == "Compared 2 images"
+    scored_images = [
+        line for line in message["content"].splitlines() if line.startswith("Photo ")
+    ]
+    assert len(scored_images) == 2
     assert len({segment["data"]["sha256"] for segment in message["segments"][:2]}) == 2

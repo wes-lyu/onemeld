@@ -8,15 +8,18 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from onemeld import server
+from onemeld.backends.base import BackendSpec
 from onemeld.composition.types import (
     QueueFullError,
     TaskRequest,
     UMMPlanningError,
     UMMRequestError,
 )
-from onemeld.config import load_config
+from onemeld.config import ServeConfig, load_config
 from onemeld.orchestrator import Segment
 from onemeld.server import create_app
+from tests.unit_test.fixtures.orchestrator import settle
 
 CONFIG = load_config(Path(__file__).parents[2] / "examples" / "onemeld" / "serve.yaml")
 IMAGE = {
@@ -168,3 +171,41 @@ def test_models_lists_the_profile_name() -> None:
     with client_for(FakeOrchestrator()) as client:
         models = client.get("/v1/models").json()
     assert [card["id"] for card in models["data"]] == ["onemeld"]
+
+
+class RecordingWorker:
+    """Records when each backend starts loading and becomes ready."""
+
+    events: list[str] = []
+
+    def __init__(self, spec: BackendSpec) -> None:
+        self.spec = spec
+
+    async def start(self) -> None:
+        self.events.append(f"load {self.spec.name}")
+        await settle()
+        self.events.append(f"ready {self.spec.name}")
+
+    async def close(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_backends_sharing_a_gpu_start_one_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An engine sizes its cache from free memory, so it must not load beside another."""
+    values = CONFIG.model_dump(mode="json")
+    values["backends"]["generation"]["gpu"] = 1
+    config = ServeConfig.model_validate(values)
+    RecordingWorker.events = []
+    monkeypatch.setattr(server, "WorkerClient", RecordingWorker)
+    await server.start_workers(config)
+    events = RecordingWorker.events
+    gpu0 = [name for name in config.backends if config.backends[name].gpu == 0]
+    gpu0_events = [event for event in events if event.split()[1] in gpu0]
+    assert gpu0_events == [
+        event for name in gpu0 for event in (f"load {name}", f"ready {name}")
+    ]
+    # The backend on its own GPU loads alongside the first one on GPU 0.
+    assert events.index("load generation") < events.index(f"ready {gpu0[0]}")

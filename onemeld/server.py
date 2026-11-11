@@ -59,10 +59,24 @@ def text_of(segments: list[Segment]) -> str:
     )
 
 
+async def start_in_order(workers: list[WorkerClient]) -> None:
+    for worker in workers:
+        await worker.start()
+
+
 async def start_workers(config: ServeConfig) -> dict[str, WorkerClient]:
+    """Start backends on different GPUs together, and those sharing a GPU in order.
+
+    note (Wes): an engine such as SGLang sizes its cache from the memory free
+    when it starts, so a backend that starts while another on its GPU is still
+    loading counts memory that the other then takes.
+    """
     workers = {name: WorkerClient(spec) for name, spec in config.backends.items()}
+    by_gpu: dict[int | None, list[WorkerClient]] = {}
+    for worker in workers.values():
+        by_gpu.setdefault(worker.spec.gpu, []).append(worker)
     started = await asyncio.gather(
-        *(worker.start() for worker in workers.values()), return_exceptions=True
+        *(start_in_order(group) for group in by_gpu.values()), return_exceptions=True
     )
     failures = [error for error in started if isinstance(error, BaseException)]
     if failures:

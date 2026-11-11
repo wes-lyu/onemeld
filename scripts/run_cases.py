@@ -295,6 +295,30 @@ def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
     )
 
 
+def leaked_step_ids(step_ids: set[str], texts: list[str]) -> list[str]:
+    """Step IDs a returned text names, also as Step 1 for step1.
+
+    Only IDs with a digit or underscore count, so a word ID such as verdict is not flagged.
+    """
+    patterns = {
+        step_id: r"[\s_]*".join(
+            re.escape(part) for part in re.split(r"(?<=[A-Za-z])(?=\d)", step_id)
+        )
+        for step_id in step_ids
+        if re.search(r"[\d_]", step_id)
+    }
+    return sorted(
+        {
+            step_id
+            for step_id, pattern in patterns.items()
+            for text in texts
+            if re.search(
+                rf"(?<![A-Za-z0-9_]){pattern}(?![A-Za-z0-9_])", text, re.IGNORECASE
+            )
+        }
+    )
+
+
 def check_integrity(
     trace: list[Json], plan: Json, artifacts: dict[str, Json], inputs: dict[str, Json]
 ) -> tuple[list[str], list[Json]]:
@@ -503,6 +527,14 @@ def run_case(
         for segment, reference in zip(segments, publish)
     ):
         errors.append("published segments differ from the planned outputs")
+    else:
+        pass
+    leaked = leaked_step_ids(
+        {step["id"] for step in plan.get("steps", [])} | artifacts.keys(),
+        [segment["data"] for segment in segments if segment["kind"] == "text"],
+    )
+    if leaked:
+        errors.append(f"returned text names internal step IDs {leaked}")
     else:
         pass
     report.integrity_errors = errors

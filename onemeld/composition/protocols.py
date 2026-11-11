@@ -2,6 +2,7 @@
 """Backend requests and results of each composition capability protocol."""
 
 import base64
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -48,6 +49,28 @@ class Base64ImageResult(BaseModel):
     image_b64: str
 
 
+def labelled_instruction(instruction: str, labels: dict[str, str]) -> str:
+    """The instruction with each input reference ID replaced by its label.
+
+    A bare ID is replaced only when a digit or underscore marks it as an ID, so an ID
+    such as scene leaves the word scene alone unless written as ID: scene.
+    """
+    # Step IDs are internal; a model that sees them repeats them in user-facing answers.
+    for reference, label in labels.items():
+        prefix = (
+            r"\bID\s*:?\s*"
+            if re.search(r"[\d_]", reference) is None
+            else r"(?:\bID\s*:?\s*)?"
+        )
+        instruction = re.sub(
+            rf"{prefix}(?<![A-Za-z0-9_]){re.escape(reference)}(?![A-Za-z0-9_])",
+            label,
+            instruction,
+            flags=re.IGNORECASE,
+        )
+    return instruction
+
+
 def step_request(
     capability: UMMCapability,
     step: UMMStepCall,
@@ -58,29 +81,39 @@ def step_request(
     max_new_tokens: int,
 ) -> StepRequest:
     """The backend request that runs step on a backend of capability."""
+    # A neutral label per input, numbered per kind in input order, such as Image 2.
+    labels: dict[str, str] = {}
+    for reference in step.input_refs:
+        value = artifacts[reference].value
+        kind = "Text" if isinstance(value, str) else value.kind.title()
+        number = sum(label.startswith(f"{kind} ") for label in labels.values()) + 1
+        labels[reference] = f"{kind} {number}"
+    instruction = labelled_instruction(step.instruction, labels)
     texts: list[tuple[str, str]] = []
     media: list[InlineMedia] = []
     for reference in step.input_refs:
         value = artifacts[reference].value
         if isinstance(value, str):
-            texts.append((reference, value))
+            texts.append((labels[reference], value))
         else:
             media.append(value)
     if capability.protocol == "native_chat":
         content: list[ContentPart] = [
             {
                 "type": "text",
-                "text": f"User request:\n{task_text}\nTask for this step: {step.instruction}",
+                "text": f"User request:\n{task_text}\nTask for this step: {instruction}",
             }
         ]
         for reference in step.input_refs:
             value = artifacts[reference].value
             if isinstance(value, str):
-                content.append({"type": "text", "text": f"Text {reference}: {value}"})
+                content.append(
+                    {"type": "text", "text": f"{labels[reference]}: {value}"}
+                )
             else:
                 content.extend(
                     [
-                        {"type": "text", "text": f"{value.kind.title()} {reference}:"},
+                        {"type": "text", "text": f"{labels[reference]}:"},
                         media_part(value),
                     ]
                 )
@@ -92,9 +125,7 @@ def step_request(
             params={**capability.parameters, "max_new_tokens": max_new_tokens},
         )
     elif capability.protocol == "image_base64":
-        prompt = step.instruction + "".join(
-            f"\nContext {reference}: {text}" for reference, text in texts
-        )
+        prompt = instruction + "".join(f"\n{label}: {text}" for label, text in texts)
         inputs: dict[str, JsonValue] = dict(capability.parameters)
         for name, value in (
             ("width", options.width),

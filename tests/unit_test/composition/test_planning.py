@@ -265,8 +265,8 @@ async def test_repeated_and_input_named_step_ids_are_renamed(
     await harness.reply("vision_worker", {"text": "Green cat"})
     check = harness.request("vision_worker").inputs[-1]["content"]
     assert [part["text"] for part in check if part["type"] == "text"][1:] == [
-        "Image generate_2:",
-        "Text image_1: Green cat",
+        "Image 1:",
+        "Text 1: Green cat",
     ]
     assert [
         part["image_url"]["url"] for part in check if part["type"] == "image_url"

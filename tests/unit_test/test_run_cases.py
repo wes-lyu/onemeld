@@ -179,6 +179,22 @@ def test_an_answer_missing_a_score_or_the_recommendation_is_incomplete(
     assert not run_cases.read_scored_answer(answer, scoring).is_complete(scoring)
 
 
+@pytest.mark.parametrize(
+    ("text", "leaked"),
+    [
+        ("**Recommendation**: Photo ID: step2", ["step2"]),
+        ("推荐step1，因为更清晰。", ["step1"]),
+        ("**Image Step 1 Score:** 9/10", ["step1"]),
+        ("Based on design_proposal, the poster uses pastels.", ["design_proposal"]),
+        ("Photo 2 wins; step10 is not a step here.", []),
+        ("The verdict: Photo 1.", []),
+    ],
+)
+def test_returned_text_naming_a_step_id_is_caught(text: str, leaked: list[str]) -> None:
+    step_ids = {"step1", "step2", "design_proposal", "verdict"}
+    assert run_cases.leaked_step_ids(step_ids, [text]) == leaked
+
+
 def test_a_plan_that_breaks_the_request_fails_its_check(
     reports: dict[str, dict]
 ) -> None:

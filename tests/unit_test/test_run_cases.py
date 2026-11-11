@@ -19,12 +19,12 @@ spec.loader.exec_module(run_cases)
 
 @pytest.fixture(scope="module")
 def reports(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict]:
-    """F4 and F6 against a planner that always plans two images and a comparison."""
+    """F4, F6 and F7 against a planner that always plans two images and a comparison."""
     root = tmp_path_factory.mktemp("cases")
     case_file = run_cases.load_cases(run_cases.DEFAULT_CASES)
     with TestClient(create_app(scripted_config(root / "trace"))) as client:
         run_cases.run_cases(
-            client, case_file, root / "trace", root / "results", {"F4", "F6"}
+            client, case_file, root / "trace", root / "results", {"F4", "F6", "F7"}
         )
     summary = json.loads((root / "results" / "summary.json").read_text())
     return {
@@ -57,6 +57,19 @@ def test_a_matching_plan_passes_with_every_output_saved(
         for line in (trace / "events.jsonl").read_text().splitlines()
     ]
     assert events[0] == "planner_start" and events.count("dispatch") == 3
+
+
+def test_a_voice_request_is_transcribed_once_before_planning(
+    reports: dict[str, dict]
+) -> None:
+    f7 = reports["F7"]
+    assert f7["passed"], f7
+    assert f7["checks"] == {
+        "audio_only_client_input": True,
+        "one_pre_transcription": True,
+        "two_images_generated_and_viewed": True,
+        "publishes_two_images": True,
+    }
 
 
 def test_a_plan_that_breaks_the_request_fails_its_check(

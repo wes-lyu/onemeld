@@ -41,6 +41,13 @@
       "prompt": "Only describe the style of the image. Do not generate an image.",
       "image": "reference.png",
       "checks": ["only_visual_response", "reference_seen_by_vl", "text_only_output"]
+    },
+    {
+      "id": "F7",
+      "purpose": "A voice-only request generates two images, scores both and recommends one.",
+      "audio": "F7-instruction.wav",
+      "transcript": "Mandarin for: Generate two photos of cats. Score each photo for clarity, subject completeness, and composition, then recommend one and explain why. If the scores are tied, prefer the photo with higher clarity.",
+      "checks": ["audio_only_client_input", "one_pre_transcription", "two_images_generated_and_viewed", "publishes_two_images"]
     }
   ]
 }

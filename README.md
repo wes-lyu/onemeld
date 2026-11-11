@@ -36,7 +36,7 @@ The request asks for two cat photos and a recommendation based on clarity, subje
 
 ## Reproduce the validation cases
 
-[examples/onemeld/cases](examples/onemeld/cases/cases.json) holds six requests that exercise composition: writing a design before generating (F1), generating from a reference image's style (F2), checking a generated image (F3), scoring two generated images (F4), a Mandarin voice-only request (F5) and describing an image without generating (F6). The reference image and the recording are in the same directory.
+[examples/onemeld/cases](examples/onemeld/cases/cases.json) holds seven requests that exercise composition: writing a design before generating (F1), generating from a reference image's style (F2), checking a generated image (F3), scoring two generated images (F4), a Mandarin voice-only request for a designed poster (F5), describing an image without generating (F6), and F4's request spoken in Mandarin (F7). The reference image and the recordings are in the same directory.
 
 Start the server with per-request traces, then run the cases on the same host:
 

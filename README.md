@@ -47,7 +47,7 @@ python scripts/run_cases.py --url http://127.0.0.1:8897 \
   --trace-dir /tmp/onemeld-trace --output results
 ```
 
-The script needs `httpx`, which the `test` extra installs. Each case directory under `results` holds the request, the response, every returned text and image, the request's plan and trace, and `report.json`. A case passes when its plan is valid on the first attempt, every hash and reference in its trace is intact, its steps run as planned and feed each other, and it returns the expected outputs. Whether an image or answer is good still needs a person to look. Add `--repeat 3` to run every case three times on the same server, with each round under `results/round-N`.
+The script needs `httpx`, which the `test` extra installs. Each case directory under `results` holds the request, the response, every returned text and image, the request's plan and trace, and `report.json`. A case passes when its plan is valid on the first attempt, every hash and reference in its trace is intact, its steps run as planned and feed each other, and it returns the expected outputs, including the text the request asked for, such as the scores and recommendation, from the step that produced it. Whether an image or answer is good still needs a person to look. Add `--repeat 3` to run every case three times on the same server, with each round under `results/round-N`.
 
 ## Mix frameworks
 

@@ -261,7 +261,9 @@ def contract_checks(
     trace: list[Json],
     dispatched: list[Json],
     kinds: list[str],
+    published: list[str],
 ) -> dict[str, bool]:
+    """Each named check on the dispatched steps and the published step IDs."""
     generations = [event for event in dispatched if event["action"] == "generate_image"]
     responses = [event for event in dispatched if event["action"] == "respond"]
     response_ids = {event["step_id"] for event in responses}
@@ -273,6 +275,9 @@ def contract_checks(
     described = {
         event["step_id"] for event in responses if "user_image_1" in reads(event)
     }
+    published_responses = [
+        event for event in responses if event["step_id"] in published
+    ]
     viewed = {
         reference["id"]
         for event in responses
@@ -292,6 +297,15 @@ def contract_checks(
         "two_images_generated_and_viewed": len(generation_ids) == 2
         and generation_ids <= viewed,
         "publishes_two_images": kinds.count("image") == 2,
+        "publishes_text_that_drove_generation": len(generations) == 1
+        and any(
+            event["step_id"] in reads(generations[0]) for event in published_responses
+        ),
+        "publishes_review_of_generated_images": bool(generation_ids)
+        and any(generation_ids <= reads(event) for event in published_responses),
+        "publishes_reference_description": any(
+            "user_image_1" in reads(event) for event in published_responses
+        ),
         "only_visual_response": not generations
         and bool(responses)
         and all(event["action"] == "respond" for event in dispatched),
@@ -385,7 +399,7 @@ def run_case(
         pass
     report.integrity_errors = errors
     report.checks = contract_checks(
-        case.checks, request, trace, dispatched, report.segment_kinds
+        case.checks, request, trace, dispatched, report.segment_kinds, publish
     )
     return report
 

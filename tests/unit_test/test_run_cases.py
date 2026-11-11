@@ -42,6 +42,7 @@ def test_a_matching_plan_passes_with_every_output_saved(
     assert f4["checks"] == {
         "two_images_generated_and_viewed": True,
         "publishes_two_images": True,
+        "publishes_review_of_generated_images": True,
     }
     directory = f4["directory"]
     assert {path.name for path in directory.glob("segment_*")} == {
@@ -69,6 +70,36 @@ def test_a_voice_request_is_transcribed_once_before_planning(
         "one_pre_transcription": True,
         "two_images_generated_and_viewed": True,
         "publishes_two_images": True,
+        "publishes_review_of_generated_images": True,
+    }
+
+
+def test_two_images_without_their_scores_fail_the_review_check(
+    reports: dict[str, dict]
+) -> None:
+    """F4's steps all ran, but only the two images reached the client."""
+    trace = reports["F4"]["directory"] / "trace"
+    events = [
+        json.loads(line) for line in (trace / "events.jsonl").read_text().splitlines()
+    ]
+    request = json.loads((reports["F4"]["directory"] / "request.json").read_text())
+    dispatched = [event for event in events if event["event"] == "dispatch"]
+    checks = run_cases.contract_checks(
+        [
+            "two_images_generated_and_viewed",
+            "publishes_two_images",
+            "publishes_review_of_generated_images",
+        ],
+        request,
+        events,
+        dispatched,
+        ["image", "image"],
+        ["cat_0", "cat_1"],
+    )
+    assert checks == {
+        "two_images_generated_and_viewed": True,
+        "publishes_two_images": True,
+        "publishes_review_of_generated_images": False,
     }
 
 

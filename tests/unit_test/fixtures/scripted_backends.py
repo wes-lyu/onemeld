@@ -22,8 +22,8 @@ ADAPTERS = {
 
 
 def scripted_config(trace_dir: Path | None = None) -> ServeConfig:
-    """serve.yaml with every model replaced by a scripted CPU backend."""
-    values = yaml.safe_load((EXAMPLES / "serve.yaml").read_text())
+    """profile-sglang-48gb.yaml with every model replaced by a scripted CPU backend."""
+    values = yaml.safe_load((EXAMPLES / "profile-sglang-48gb.yaml").read_text())
     for name, adapter in ADAPTERS.items():
         backend = values["backends"][name]
         backend.update(adapter=f"{__name__}:{adapter}", args={}, env={}, gpu=None)

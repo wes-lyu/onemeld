@@ -1,4 +1,4 @@
-# The serve.yaml profile with speech transcription on an SGLang-Omni pipeline.
+# profile-sglang-48gb.yaml with speech transcription on an SGLang-Omni pipeline.
 # Install: uv pip install -e ".[sglang,sglang-omni]"
 # Run from the repository root, since the ASR backend names its pipeline file
 # by a relative path.
@@ -36,7 +36,7 @@ backends:
     gpu: 0
     args:
       # The stage's memory, batching and compile settings live in this file.
-      config: examples/onemeld/qwen3_asr_pipeline.yaml
+      config: examples/onemeld/sglang-omni-pipeline-qwen3-asr.yaml
   generation:
     framework: sglang
     task: image

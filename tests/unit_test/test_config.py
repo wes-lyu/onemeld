@@ -19,10 +19,12 @@ class ProfileChange(Protocol):
 
 
 def profile() -> Profile:
-    return yaml.safe_load((EXAMPLES / "serve.yaml").read_text())
+    return yaml.safe_load((EXAMPLES / "profile-sglang-48gb.yaml").read_text())
 
 
-@pytest.mark.parametrize("name", ["serve.yaml", "sglang_omni.yaml"])
+@pytest.mark.parametrize(
+    "name", ["profile-sglang-48gb.yaml", "profile-sglang-omni-asr-48gb.yaml"]
+)
 def test_example_profiles_load(name: str) -> None:
     config = load_config(EXAMPLES / name)
     assert list(config.backends) == ["understanding", "asr", "generation"]

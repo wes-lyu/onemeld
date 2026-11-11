@@ -21,7 +21,9 @@ from onemeld.orchestrator import Segment
 from onemeld.server import create_app
 from tests.unit_test.fixtures.orchestrator import settle
 
-CONFIG = load_config(Path(__file__).parents[2] / "examples" / "onemeld" / "serve.yaml")
+CONFIG = load_config(
+    Path(__file__).parents[2] / "examples" / "onemeld" / "profile-sglang-48gb.yaml"
+)
 IMAGE = {
     "kind": "image",
     "url": "data:image/png;base64,eA==",

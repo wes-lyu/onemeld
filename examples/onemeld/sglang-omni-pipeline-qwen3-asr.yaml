@@ -1,9 +1,9 @@
 # SGLang-Omni pipeline for Qwen3-ASR-0.6B, sized to share one 48 GB GPU with
-# the vision model and SenseNova in sglang_omni.yaml. The built-in defaults
-# suit a dedicated GPU: 64 concurrent requests, torch.compile and a 2 GiB
-# encoder cache.
+# the vision model and SenseNova in profile-sglang-omni-asr-48gb.yaml. The
+# built-in defaults suit a dedicated GPU: 64 concurrent requests,
+# torch.compile and a 2 GiB encoder cache.
 #
-# model_path must match the backend's model in sglang_omni.yaml.
+# model_path must match the backend's model in that profile.
 config_cls: Qwen3ASRPipelineConfig
 name: onemeld-qwen3-asr
 model_path: Qwen/Qwen3-ASR-0.6B

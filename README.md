@@ -10,14 +10,14 @@ Send text, inline images or short speech instructions to `/v1/chat/completions`.
 
 ## Run the first example
 
-The [example profile](examples/onemeld/serve.yaml) runs three models with SGLang on one 48 GB Linux CUDA GPU, and has been run on an RTX 4090: Qwen3-VL-4B-Instruct plans and answers text and visual tasks, SenseNova-U1.5-8B-MoT generates images, and Qwen3-ASR-0.6B transcribes spoken instructions. SenseNova keeps its DiT on the GPU and offloads its encoders and VAE to CPU on its own, which leaves no room for a separate planner model on that card. To fit, the vision model loads with FP8 weights and the speech model transcribes 30 seconds of audio at startup to reserve its memory before SenseNova starts; the profile's comments list the measured memory per process. With a second GPU, add a dedicated planner backend there and point `composition.planner_stage` at it.
+The [example profile](examples/onemeld/profile-sglang-48gb.yaml) runs three models with SGLang on one 48 GB Linux CUDA GPU, and has been run on an RTX 4090: Qwen3-VL-4B-Instruct plans and answers text and visual tasks, SenseNova-U1.5-8B-MoT generates images, and Qwen3-ASR-0.6B transcribes spoken instructions. SenseNova keeps its DiT on the GPU and offloads its encoders and VAE to CPU on its own, which leaves no room for a separate planner model on that card. To fit, the vision model loads with FP8 weights and the speech model transcribes 30 seconds of audio at startup to reserve its memory before SenseNova starts; the profile's comments list the measured memory per process. With a second GPU, add a dedicated planner backend there and point `composition.planner_stage` at it.
 
 From the repository root, install into a fresh Python 3.12 environment:
 
 ```bash
 uv venv --python 3.12
 uv pip install --prerelease=allow -e ".[sglang]"
-.venv/bin/onemeld serve --config examples/onemeld/serve.yaml --host 127.0.0.1 --port 8897
+.venv/bin/onemeld serve --config examples/onemeld/profile-sglang-48gb.yaml --host 127.0.0.1 --port 8897
 ```
 
 Each backend's `model` is a Hugging Face repository ID. To use weights you already have, set it to the checkpoint directory.
@@ -41,7 +41,7 @@ The request asks for two cat photos and a recommendation based on clarity, subje
 Start the server with per-request traces, then run the cases on the same host:
 
 ```bash
-onemeld serve --config examples/onemeld/serve.yaml --port 8897 \
+onemeld serve --config examples/onemeld/profile-sglang-48gb.yaml --port 8897 \
   --trace-dir /tmp/onemeld-trace
 python scripts/run_cases.py --url http://127.0.0.1:8897 \
   --trace-dir /tmp/onemeld-trace --output results
@@ -51,7 +51,7 @@ The script needs `httpx`, which the `test` extra installs. Each case directory u
 
 ## Mix frameworks
 
-[sglang_omni.yaml](examples/onemeld/sglang_omni.yaml) is the same profile with speech transcription on SGLang-Omni's Qwen3-ASR pipeline instead of SGLang. The ASR backend names its pipeline file in `args.config`; [qwen3_asr_pipeline.yaml](examples/onemeld/qwen3_asr_pipeline.yaml) sizes the stage to share the GPU, since SGLang-Omni's defaults suit a dedicated one. The file's `model_path` must match the backend's `model`. On an RTX 4090 all nine validation cases passed three rounds in a row with this profile. Run it from the repository root, where the relative pipeline path resolves. A backend whose framework needs its own environment names that environment's interpreter:
+[profile-sglang-omni-asr-48gb.yaml](examples/onemeld/profile-sglang-omni-asr-48gb.yaml) is the same profile with speech transcription on SGLang-Omni's Qwen3-ASR pipeline instead of SGLang. The ASR backend names its pipeline file in `args.config`; [sglang-omni-pipeline-qwen3-asr.yaml](examples/onemeld/sglang-omni-pipeline-qwen3-asr.yaml) sizes the stage to share the GPU, since SGLang-Omni's defaults suit a dedicated one. The file's `model_path` must match the backend's `model`. On an RTX 4090 all nine validation cases passed three rounds in a row with this profile. Run it from the repository root, where the relative pipeline path resolves. A backend whose framework needs its own environment names that environment's interpreter:
 
 ```yaml
 backends:

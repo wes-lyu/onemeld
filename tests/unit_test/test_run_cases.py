@@ -20,12 +20,16 @@ CASES = {case.id: case for case in run_cases.load_cases(run_cases.DEFAULT_CASES)
 
 @pytest.fixture(scope="module")
 def reports(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict]:
-    """F4, F6 and F7 against a planner that always plans two images and a comparison."""
+    """F4, F6, F7 and F9 against a planner that always plans two images and a comparison."""
     root = tmp_path_factory.mktemp("cases")
     case_file = run_cases.load_cases(run_cases.DEFAULT_CASES)
     with TestClient(create_app(scripted_config(root / "trace"))) as client:
         run_cases.run_cases(
-            client, case_file, root / "trace", root / "results", {"F4", "F6", "F7"}
+            client,
+            case_file,
+            root / "trace",
+            root / "results",
+            {"F4", "F6", "F7", "F9"},
         )
     summary = json.loads((root / "results" / "summary.json").read_text())
     return {
@@ -62,12 +66,13 @@ def test_a_matching_plan_passes_with_every_output_saved(
     assert events[0] == "planner_start" and events.count("dispatch") == 3
 
 
+@pytest.mark.parametrize("case_id", ["F7", "F9"])
 def test_a_voice_request_is_transcribed_once_before_planning(
-    reports: dict[str, dict]
+    reports: dict[str, dict], case_id: str
 ) -> None:
-    f7 = reports["F7"]
-    assert f7["passed"], f7
-    assert f7["checks"] == {
+    report = reports[case_id]
+    assert report["passed"], report
+    assert report["checks"] == {
         "audio_only_client_input": True,
         "one_pre_transcription": True,
         "two_images_generated_and_viewed": True,
@@ -130,6 +135,14 @@ def test_two_images_without_their_scores_fail(reports: dict[str, dict]) -> None:
             "Subject Completeness: 9/10, Composition: 8/10\n"
             "**Recommendation: Image step2**",
             {"step1": (9, 8, 8), "step2": (9, 9, 8)},
+            "step2",
+        ),
+        (
+            "**Photo ID: step1**\n- **Clarity**: 9/10\n- **Subject Completeness**: 8/10\n"
+            "- **Composition**: 8/10\n\n**Photo ID: step2**\n- **Clarity**: 10/10\n"
+            "- **Subject Completeness**: 9/10\n- **Composition**: 10/10\n\n"
+            "**Recommendation**: Photo ID: step2",
+            {"step1": (9, 8, 8), "step2": (10, 9, 10)},
             "step2",
         ),
     ],

@@ -38,7 +38,8 @@ HEALTH_POLL_INTERVAL_S = 3.0
 Json = dict[str, JsonValue]
 RECOMMENDATION_WORDS = ("recommend", "推荐")
 IMAGE_LABEL = re.compile(
-    r"(?:photo|image|picture|照片|图片)\s*(step\s*\d+|\d+|[一二两])|第\s*([一二两\d])\s*张",
+    r"(?:photo|image|picture|照片|图片)(?:\s*id)?[\s:：#*]*(step\s*\d+|\d+|[一二两])"
+    r"|第\s*([一二两\d])\s*张",
     re.IGNORECASE,
 )
 CHINESE_DIGITS = {"一": "1", "二": "2", "两": "2"}

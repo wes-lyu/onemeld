@@ -64,6 +64,28 @@
         }
       },
       "checks": ["audio_only_client_input", "one_pre_transcription", "two_images_generated_and_viewed", "publishes_two_images", "publishes_review_of_generated_images", "states_scores_and_recommendation"]
+    },
+    {
+      "id": "F8",
+      "purpose": "F5's poster request spoken in English runs through transcription, planning, design and generation.",
+      "audio": "F8-instruction.wav",
+      "transcript": "Design a poster for a children's library. First write a visual design proposal, then generate the image. Do not include any text in the image.",
+      "checks": ["audio_only_client_input", "one_pre_transcription", "text_result_drives_generation", "publishes_text_and_image", "publishes_text_that_drove_generation"]
+    },
+    {
+      "id": "F9",
+      "purpose": "F7's request spoken in English generates two images, scores both and recommends one.",
+      "audio": "F9-instruction.wav",
+      "transcript": "Generate two photos of cats. Score each photo for clarity, subject completeness, and composition, then recommend one and explain why. If the scores are tied, prefer the photo with higher clarity.",
+      "scoring": {
+        "image_count": 2,
+        "criteria": {
+          "clarity": ["clarity", "清晰度"],
+          "subject completeness": ["subject completeness", "主体完整性", "主体完整度"],
+          "composition": ["composition", "构图"]
+        }
+      },
+      "checks": ["audio_only_client_input", "one_pre_transcription", "two_images_generated_and_viewed", "publishes_two_images", "publishes_review_of_generated_images", "states_scores_and_recommendation"]
     }
   ]
 }

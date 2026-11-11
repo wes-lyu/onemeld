@@ -36,7 +36,7 @@ The request asks for two cat photos and a recommendation based on clarity, subje
 
 ## Reproduce the validation cases
 
-[examples/onemeld/cases](examples/onemeld/cases/cases.json) holds seven requests that exercise composition: writing a design before generating (F1), generating from a reference image's style (F2), checking a generated image (F3), scoring two generated images (F4), a Mandarin voice-only request for a designed poster (F5), describing an image without generating (F6), and F4's request spoken in Mandarin (F7). The reference image and the recordings are in the same directory.
+[examples/onemeld/cases](examples/onemeld/cases/cases.json) holds nine requests that exercise composition: writing a design before generating (F1), generating from a reference image's style (F2), checking a generated image (F3), scoring two generated images (F4), a Mandarin voice-only request for a designed poster (F5), describing an image without generating (F6), F4's request spoken in Mandarin (F7), and F5's and F7's requests spoken in English (F8, F9). The reference image and the recordings are in the same directory.
 
 Start the server with per-request traces, then run the cases on the same host:
 
@@ -47,7 +47,7 @@ python scripts/run_cases.py --url http://127.0.0.1:8897 \
   --trace-dir /tmp/onemeld-trace --output results
 ```
 
-The script needs `httpx`, which the `test` extra installs. Each case directory under `results` holds the request, the response, every returned text and image, the request's plan and trace, and `report.json`. A case passes when its plan is valid on the first attempt, every hash and reference in its trace is intact, its steps run as planned and feed each other, and it returns the expected outputs, including the text the request asked for, such as the scores and recommendation, from the step that produced it. For F4 and F7 it also reads every photo's score on each criterion and the recommended photo from the answer, and requires a score for every photo on every criterion and a recommendation of one of them; `report.json` records what it read under `scored_answer`. Whether an image or answer is good beyond that still needs a person to look. Add `--repeat 3` to run every case three times on the same server, with each round under `results/round-N`.
+The script needs `httpx`, which the `test` extra installs. Each case directory under `results` holds the request, the response, every returned text and image, the request's plan and trace, and `report.json`. A case passes when its plan is valid on the first attempt, every hash and reference in its trace is intact, its steps run as planned and feed each other, and it returns the expected outputs, including the text the request asked for, such as the scores and recommendation, from the step that produced it. For F4, F7 and F9 it also reads every photo's score on each criterion and the recommended photo from the answer, and requires a score for every photo on every criterion and a recommendation of one of them; `report.json` records what it read under `scored_answer`. Whether an image or answer is good beyond that still needs a person to look. Add `--repeat 3` to run every case three times on the same server, with each round under `results/round-N`.
 
 ## Mix frameworks
 

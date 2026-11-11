@@ -25,6 +25,8 @@ A backend's `args` go to its framework unchanged, for example SGLang `Engine` ar
 
 With `trace: true` the log records the accepted plan, each dispatch and each produced artifact. Use the returned segments' `execution_id` to find these entries. A structurally valid plan can still misinterpret the user's request.
 
+With `trace_dir` set, or `onemeld serve --trace-dir`, each request also writes `<trace_dir>/<execution_id>/`: `events.jsonl` with every trace event and its timestamps, `plan.json`, the raw planner replies in `planner-results.jsonl`, and each step result under `artifacts/`. [scripts/run_cases.py](../../scripts/run_cases.py) reads these files to check a request's structure.
+
 ## Adding a framework backend
 
 1. Write a class in a new module, for example `onemeld/backends/vllm.py`, that takes a `BackendSpec` and implements `load`, `start`, `run`, `cancel` and `close` as described by `Backend` in [base.py](../../onemeld/backends/base.py). `load` runs on the worker's main thread before its event loop starts, which is where a framework engine that installs signal handlers must be built.

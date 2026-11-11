@@ -21,6 +21,7 @@ from onemeld.composition.plan import (
 from onemeld.composition.planner import UMMPlanRepair, build_planner_request
 from onemeld.composition.protocols import NativeTextResult, step_artifact, step_request
 from onemeld.composition.task import MAX_TASK_TEXT_BYTES, ClientTask, parse_task
+from onemeld.composition.trace import TraceRecorder
 from onemeld.composition.types import (
     CloseReason,
     UMMContext,
@@ -69,6 +70,11 @@ class UMMCompositionAdapter:
     def __init__(self, composition: UMMCompositionSpec) -> None:
         self.composition = composition
         self.executions: dict[str, CompositionExecution] = {}
+        self.recorder = (
+            TraceRecorder(composition.trace_dir)
+            if composition.trace_dir is not None
+            else None
+        )
 
     def emit_trace(
         self,
@@ -76,6 +82,19 @@ class UMMCompositionAdapter:
         event: TraceEvent,
         details: dict[str, JsonValue],
     ) -> None:
+        if self.recorder is not None:
+            self.recorder.record(
+                context.execution_id,
+                event,
+                details,
+                (
+                    self.executions[context.execution_id].artifacts[details["step_id"]]
+                    if event == "artifact"
+                    else None
+                ),
+            )
+        else:
+            pass
         if self.composition.trace:
             trace = {"event": event, "execution_id": context.execution_id, **details}
             logger.info(
@@ -125,6 +144,10 @@ class UMMCompositionAdapter:
 
     def planner_step(self, context: UMMContext) -> UMMStep:
         execution = self.executions[context.execution_id]
+        if self.recorder is not None:
+            self.recorder.record(context.execution_id, "planner_start", {})
+        else:
+            pass
         request = build_planner_request(
             self.composition,
             execution.task.content,
@@ -137,6 +160,10 @@ class UMMCompositionAdapter:
 
     def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
         execution = self.executions[context.execution_id]
+        if self.recorder is not None and phase == PLAN_PHASE:
+            self.recorder.planner_result(context.execution_id, result)
+        else:
+            pass
         transcription = execution.input_transcription
         if transcription is not None:
             capability = self.composition.capabilities[transcription.action]

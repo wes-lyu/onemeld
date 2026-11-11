@@ -2,14 +2,37 @@
 """CPU backends that play each model of the example profile in real worker processes."""
 
 import json
+from pathlib import Path
 
+import yaml
 from PIL import Image
 
 from onemeld.backends.base import BackendSpec, StepResult
 from onemeld.backends.images import image_result
 from onemeld.composition.types import StepRequest
+from onemeld.config import ServeConfig
 
 COLORS = ("red", "blue")
+EXAMPLES = Path(__file__).parents[3] / "examples" / "onemeld"
+ADAPTERS = {
+    "understanding": "VisionBackend",
+    "generation": "PainterBackend",
+    "asr": "ListenerBackend",
+}
+
+
+def scripted_config(trace_dir: Path | None = None) -> ServeConfig:
+    """serve.yaml with every model replaced by a scripted CPU backend."""
+    values = yaml.safe_load((EXAMPLES / "serve.yaml").read_text())
+    for name, adapter in ADAPTERS.items():
+        backend = values["backends"][name]
+        backend.update(adapter=f"{__name__}:{adapter}", args={}, env={}, gpu=None)
+        backend["startup_timeout_s"] = 60.0
+    if trace_dir is not None:
+        values["composition"]["trace_dir"] = str(trace_dir)
+    else:
+        pass
+    return ServeConfig.model_validate(values)
 
 
 class ScriptedBackendBase:

@@ -231,6 +231,8 @@ class UMMCompositionSpec(BaseModel):
     planning_chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
     response_max_new_tokens: int = Field(default=1024, ge=1)
     trace: bool = False
+    # Directory for per-request trace files; see onemeld.composition.trace.
+    trace_dir: str | None = None
     audio_instruction_capability: str | None = None
     max_concurrent_steps: int | None = Field(default=None, ge=1)
 

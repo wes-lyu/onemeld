@@ -27,6 +27,8 @@ seedtts_testset/
 .coverage
 htmlcov/
 *.wav
+# Validation case inputs are part of the repository.
+!examples/onemeld/cases/*.wav
 
 # Logs
 *.log

@@ -1,0 +1,46 @@
+{
+  "options": {"width": 512, "height": 512, "steps": 20},
+  "seed": 42,
+  "max_completion_tokens": 1024,
+  "cases": [
+    {
+      "id": "F1",
+      "purpose": "A written design drives image generation, and both are returned.",
+      "prompt": "Design a poster for a children's library. First write a visual design proposal, then generate the image. Do not include any text in the image.",
+      "checks": ["text_result_drives_generation", "publishes_text_and_image"]
+    },
+    {
+      "id": "F2",
+      "purpose": "A style read from a reference image conditions a new image on a different subject.",
+      "prompt": "First describe the style of this image, then generate an image of a cafe in the same style.",
+      "image": "reference.png",
+      "checks": ["reference_seen_by_vl", "description_drives_generation", "publishes_text_and_image"]
+    },
+    {
+      "id": "F3",
+      "purpose": "A generated image reaches the vision model, which checks each requested feature.",
+      "prompt": "Generate an image of a cat wearing a red scarf. Then check whether there is a cat, whether it is wearing a scarf, and whether the scarf is red.",
+      "checks": ["generated_image_checked", "publishes_text_and_image"]
+    },
+    {
+      "id": "F4",
+      "purpose": "Two generated images are scored on the same criteria and a recommendation follows from the scores.",
+      "prompt": "Generate two photos of cats. Score each photo for clarity, subject completeness, and composition, then recommend one and explain why. If the scores are tied, prefer the photo with higher clarity.",
+      "checks": ["two_images_generated_and_viewed", "publishes_two_images"]
+    },
+    {
+      "id": "F5",
+      "purpose": "A voice-only request runs through transcription, planning, design and generation.",
+      "audio": "F5-instruction.wav",
+      "transcript": "Mandarin for: Design a poster for a children's library. First write a visual design proposal, then generate the image. Do not include any text in the image.",
+      "checks": ["audio_only_client_input", "one_pre_transcription", "text_result_drives_generation", "publishes_text_and_image"]
+    },
+    {
+      "id": "F6",
+      "purpose": "With F2's reference image, a describe-only request runs no generation.",
+      "prompt": "Only describe the style of the image. Do not generate an image.",
+      "image": "reference.png",
+      "checks": ["only_visual_response", "reference_seen_by_vl", "text_only_output"]
+    }
+  ]
+}

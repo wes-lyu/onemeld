@@ -34,6 +34,21 @@ jq -r '.choices[0].message.segments[].kind' response.json
 
 The request asks for two cat photos and a recommendation based on clarity, subject completeness and composition. A successful response contains two image segments and a text segment; on the RTX 4090 it took about 23 seconds. The server log includes the accepted plan and each dispatch under `UMM composition trace`, keyed by the response segments' `execution_id`.
 
+## Reproduce the validation cases
+
+[examples/onemeld/cases](examples/onemeld/cases/cases.json) holds six requests that exercise composition: writing a design before generating (F1), generating from a reference image's style (F2), checking a generated image (F3), scoring two generated images (F4), a Mandarin voice-only request (F5) and describing an image without generating (F6). The reference image and the recording are in the same directory.
+
+Start the server with per-request traces, then run the cases on the same host:
+
+```bash
+onemeld serve --config examples/onemeld/serve.yaml --port 8897 \
+  --trace-dir /tmp/onemeld-trace
+python scripts/run_cases.py --url http://127.0.0.1:8897 \
+  --trace-dir /tmp/onemeld-trace --output results
+```
+
+The script needs `httpx`, which the `test` extra installs. Each case directory under `results` holds the request, the response, every returned text and image, the request's plan and trace, and `report.json`. A case passes when its plan is valid on the first attempt, every hash and reference in its trace is intact, its steps run as planned and feed each other, and it returns the expected outputs. Whether an image or answer is good still needs a person to look.
+
 ## Mix frameworks
 
 [sglang_omni.yaml](examples/onemeld/sglang_omni.yaml) is the same profile with speech transcription on an SGLang-Omni pipeline instead of SGLang. Unlike serve.yaml, it has not been run on a GPU yet. A backend whose framework needs its own environment names that environment's interpreter:

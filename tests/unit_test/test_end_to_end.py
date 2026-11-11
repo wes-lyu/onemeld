@@ -2,31 +2,11 @@
 """The example profile's shape served end to end through real worker processes."""
 
 import json
-from pathlib import Path
 
-import yaml
 from fastapi.testclient import TestClient
 
-from onemeld.config import ServeConfig
 from onemeld.server import create_app
-
-EXAMPLES = Path(__file__).parents[2] / "examples" / "onemeld"
-SCRIPTED = "tests.unit_test.fixtures.scripted_backends"
-ADAPTERS = {
-    "understanding": "VisionBackend",
-    "generation": "PainterBackend",
-    "asr": "ListenerBackend",
-}
-
-
-def scripted_config() -> ServeConfig:
-    """serve.yaml with every model replaced by a scripted CPU backend."""
-    values = yaml.safe_load((EXAMPLES / "serve.yaml").read_text())
-    for name, adapter in ADAPTERS.items():
-        backend = values["backends"][name]
-        backend.update(adapter=f"{SCRIPTED}:{adapter}", args={}, env={}, gpu=None)
-        backend["startup_timeout_s"] = 60.0
-    return ServeConfig.model_validate(values)
+from tests.unit_test.fixtures.scripted_backends import EXAMPLES, scripted_config
 
 
 def test_compare_cats_request_runs_through_worker_processes() -> None:

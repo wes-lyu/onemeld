@@ -22,6 +22,10 @@ def main() -> None:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--model-name", help="Public model name; overrides the profile.")
     serve.add_argument("--log-level", default="info")
+    serve.add_argument(
+        "--trace-dir",
+        help="Write each request's trace files here; overrides composition.trace_dir.",
+    )
     options = parser.parse_args()
     try:
         config = load_config(options.config)
@@ -29,6 +33,13 @@ def main() -> None:
         parser.error(str(error))
     if options.model_name:
         config = config.model_copy(update={"model_name": options.model_name})
+    else:
+        pass
+    if options.trace_dir:
+        composition = config.composition.model_copy(
+            update={"trace_dir": options.trace_dir}
+        )
+        config = config.model_copy(update={"composition": composition})
     else:
         pass
     logging.basicConfig(

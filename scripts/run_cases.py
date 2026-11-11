@@ -440,6 +440,27 @@ def run_cases(
     return reports
 
 
+def run_rounds(
+    client: httpx.Client,
+    case_file: CaseFile,
+    trace_root: Path,
+    output: Path,
+    only: set[str] | None,
+    repeat: int,
+) -> list[CaseReport]:
+    """Run the cases repeat times on one server, each round under output/round-N."""
+    reports: list[CaseReport] = []
+    for round_number in range(1, repeat + 1):
+        directory = output / f"round-{round_number}" if repeat > 1 else output
+        directory.mkdir(parents=True, exist_ok=True)
+        if repeat > 1:
+            print(f"Round {round_number} of {repeat}", flush=True)
+        else:
+            pass
+        reports.extend(run_cases(client, case_file, trace_root, directory, only))
+    return reports
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--url", default="http://127.0.0.1:8897")
@@ -452,7 +473,17 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--only", help="Comma-separated case IDs, such as F1,F3.")
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Run the cases this many times on the same server, to check reliability.",
+    )
     options = parser.parse_args()
+    if options.repeat < 1:
+        parser.error("--repeat must be at least 1")
+    else:
+        pass
     if options.output.exists():
         parser.error(f"{options.output} already exists; choose a new output directory")
     else:
@@ -461,15 +492,16 @@ def main() -> None:
         base_url=options.url, timeout=REQUEST_TIMEOUT_S, trust_env=False
     ) as client:
         wait_until_healthy(client)
-        reports = run_cases(
+        reports = run_rounds(
             client,
             load_cases(options.cases),
             options.trace_dir,
             options.output,
             set(options.only.split(",")) if options.only else None,
+            options.repeat,
         )
     passed = sum(report.passed for report in reports)
-    print(f"{passed}/{len(reports)} cases passed; results in {options.output}")
+    print(f"{passed}/{len(reports)} case runs passed; results in {options.output}")
     sys.exit(0 if passed == len(reports) else 1)
 
 

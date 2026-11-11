@@ -10,7 +10,7 @@ Send text, inline images or short speech instructions to `/v1/chat/completions`.
 
 ## Run the first example
 
-The [example profile](examples/onemeld/serve.yaml) runs three models with SGLang on one 48 GB Linux CUDA GPU, and has been run on an RTX 4090: Qwen3-VL-4B-Instruct plans and answers text and visual tasks, SenseNova-U1.5-8B-MoT generates images, and Qwen3-ASR-0.6B transcribes spoken instructions. SenseNova keeps its DiT on the GPU and offloads its encoders and VAE to CPU on its own, which leaves no room for a separate planner model on that card. With a second GPU, add a dedicated planner backend there and point `composition.planner_stage` at it.
+The [example profile](examples/onemeld/serve.yaml) runs three models with SGLang on one 48 GB Linux CUDA GPU, and has been run on an RTX 4090: Qwen3-VL-4B-Instruct plans and answers text and visual tasks, SenseNova-U1.5-8B-MoT generates images, and Qwen3-ASR-0.6B transcribes spoken instructions. SenseNova keeps its DiT on the GPU and offloads its encoders and VAE to CPU on its own, which leaves no room for a separate planner model on that card. To fit, the vision model loads with FP8 weights and the speech model transcribes 30 seconds of audio at startup to reserve its memory before SenseNova starts; the profile's comments list the measured memory per process. With a second GPU, add a dedicated planner backend there and point `composition.planner_stage` at it.
 
 From the repository root, install into a fresh Python 3.12 environment:
 
@@ -47,7 +47,7 @@ python scripts/run_cases.py --url http://127.0.0.1:8897 \
   --trace-dir /tmp/onemeld-trace --output results
 ```
 
-The script needs `httpx`, which the `test` extra installs. Each case directory under `results` holds the request, the response, every returned text and image, the request's plan and trace, and `report.json`. A case passes when its plan is valid on the first attempt, every hash and reference in its trace is intact, its steps run as planned and feed each other, and it returns the expected outputs. Whether an image or answer is good still needs a person to look.
+The script needs `httpx`, which the `test` extra installs. Each case directory under `results` holds the request, the response, every returned text and image, the request's plan and trace, and `report.json`. A case passes when its plan is valid on the first attempt, every hash and reference in its trace is intact, its steps run as planned and feed each other, and it returns the expected outputs. Whether an image or answer is good still needs a person to look. Add `--repeat 3` to run every case three times on the same server, with each round under `results/round-N`.
 
 ## Mix frameworks
 

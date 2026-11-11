@@ -6,7 +6,10 @@ import base64
 import io
 import json
 import logging
+import math
+import struct
 import threading
+import wave
 from collections.abc import Coroutine
 
 from PIL import Image
@@ -41,6 +44,14 @@ LOOP_STOP_TIMEOUT_S = 10.0
 SPEC_OWNED_ARGS = frozenset({"model_path", "base_gpu_id", "gpu_id_step"})
 WARMUP_PROMPT = "The capital city of France is"
 WARMUP_IMAGE_SIZE = 64
+# Backend args the adapter reads itself instead of passing to the Engine.
+ADAPTER_ARGS = frozenset({"warmup_audio_seconds"})
+# note (Wes): the encoder keeps memory sized to the longest clip it has seen,
+# about 120 MB per 10 s for Qwen3-ASR-0.6B on an RTX 4090, and that memory
+# comes out of whatever else shares the GPU.
+DEFAULT_WARMUP_AUDIO_SECONDS = 10.0
+WARMUP_AUDIO_RATE = 16000
+WARMUP_TONE_HZ = 440.0
 # Image step parameters SGLang's diffusion sampling takes under the same name.
 IMAGE_SAMPLING_PARAMS = frozenset(
     {"width", "height", "num_inference_steps", "guidance_scale", "seed"}
@@ -57,7 +68,9 @@ def engine_kwargs(spec: BackendSpec) -> dict[str, JsonValue]:
         pass
     # The worker sees only its own GPU, as device 0.
     kwargs: dict[str, JsonValue] = {
-        **spec.args,
+        **{
+            name: value for name, value in spec.args.items() if name not in ADAPTER_ARGS
+        },
         "model_path": spec.model,
         "base_gpu_id": 0,
     }
@@ -236,6 +249,23 @@ class SGLangChatBackend:
         await self.host.close()
 
 
+def warmup_audio(seconds: float) -> bytes:
+    """A WAV tone of the given length."""
+    frames = int(seconds * WARMUP_AUDIO_RATE)
+    samples = b"".join(
+        struct.pack(
+            "<h",
+            int(8000 * math.sin(2 * math.pi * WARMUP_TONE_HZ * i / WARMUP_AUDIO_RATE)),
+        )
+        for i in range(frames)
+    )
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as recording:
+        recording.setparams((1, 2, WARMUP_AUDIO_RATE, 0, "NONE", "not compressed"))
+        recording.writeframes(samples)
+    return buffer.getvalue()
+
+
 class SGLangTranscriptionBackend:
     """Speech transcription through SGLang's OpenAI transcription serving layer."""
 
@@ -249,7 +279,28 @@ class SGLangTranscriptionBackend:
         self.serving = OpenAIServingTranscription(self.host.engine.tokenizer_manager)
 
     async def start(self) -> None:
-        pass
+        """Transcribe a warmup_audio_seconds clip so the encoder reserves its memory now.
+
+        note (Wes): the engine keeps memory it has used for reuse, but only the
+        KV cache is sized at startup. Without this, the first real clip asks for
+        encoder memory after later backends on the GPU have taken it.
+        """
+        assert self.host.engine is not None
+        if self.host.engine.server_args.skip_server_warmup:
+            return
+        else:
+            pass
+        seconds = self.host.spec.args.get(
+            "warmup_audio_seconds", DEFAULT_WARMUP_AUDIO_SECONDS
+        )
+        if not isinstance(seconds, (int, float)) or seconds < 0:
+            raise ValueError("warmup_audio_seconds must be a non-negative number")
+        elif seconds == 0:
+            return
+        else:
+            pass
+        result = await self.run("warmup", StepRequest(inputs=warmup_audio(seconds)))
+        logger.info(f"Transcription warmup returned {len(result['text'])} characters")
 
     async def run(self, request_id: str, request: StepRequest) -> StepResult:
         assert self.serving is not None

@@ -82,3 +82,16 @@ def test_a_tampered_artifact_is_an_integrity_error(reports: dict[str, dict]) -> 
     artifacts["verdict"]["value"] = "Edited after the fact"
     errors, _ = run_cases.check_integrity(events, plan, artifacts, {})
     assert errors == ["artifact verdict does not match its own hash"]
+
+
+def test_repeated_rounds_each_keep_their_own_results(tmp_path: Path) -> None:
+    case_file = run_cases.load_cases(run_cases.DEFAULT_CASES)
+    with TestClient(create_app(scripted_config(tmp_path / "trace"))) as client:
+        reports = run_cases.run_rounds(
+            client, case_file, tmp_path / "trace", tmp_path / "results", {"F4"}, 2
+        )
+    assert [report.passed for report in reports] == [True, True]
+    assert reports[0].execution_id != reports[1].execution_id
+    for round_number in (1, 2):
+        summary = tmp_path / "results" / f"round-{round_number}" / "summary.json"
+        assert [entry["case"] for entry in json.loads(summary.read_text())] == ["F4"]

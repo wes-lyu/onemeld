@@ -2,11 +2,14 @@
 """SGLang backends: chat and transcription on sglang.Engine, images on DiffGenerator."""
 
 import asyncio
+import base64
+import io
 import json
 import logging
 import threading
 from collections.abc import Coroutine
 
+from PIL import Image
 from pydantic import JsonValue
 from sglang import Engine
 from sglang.multimodal_gen import DiffGenerator
@@ -37,6 +40,7 @@ LOOP_STOP_TIMEOUT_S = 10.0
 # Engine arguments the backend spec owns.
 SPEC_OWNED_ARGS = frozenset({"model_path", "base_gpu_id", "gpu_id_step"})
 WARMUP_PROMPT = "The capital city of France is"
+WARMUP_IMAGE_SIZE = 64
 # Image step parameters SGLang's diffusion sampling takes under the same name.
 IMAGE_SAMPLING_PARAMS = frozenset(
     {"width", "height", "num_inference_steps", "guidance_scale", "seed"}
@@ -149,6 +153,24 @@ class EngineHost:
                 pass
 
 
+def warmup_image_content() -> list[dict[str, JsonValue]]:
+    """An image question, so a vision model sets up its image path while starting.
+
+    note (Wes): SGLang's tokenizer process creates its CUDA context on the first
+    image it processes. Later, other backends on the GPU may have taken the
+    memory that context needs.
+    """
+    buffer = io.BytesIO()
+    Image.new("RGB", (WARMUP_IMAGE_SIZE, WARMUP_IMAGE_SIZE), "red").save(
+        buffer, format="PNG"
+    )
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+        {"type": "text", "text": "Describe the image."},
+    ]
+
+
 class SGLangChatBackend:
     """Chat completions through SGLang's own OpenAI chat serving layer."""
 
@@ -171,10 +193,20 @@ class SGLangChatBackend:
             return
         else:
             pass
+        model_config = self.host.engine.tokenizer_manager.model_config
         result = await self.run(
             "warmup",
             StepRequest(
-                inputs=[{"role": "user", "content": WARMUP_PROMPT}],
+                inputs=[
+                    {
+                        "role": "user",
+                        "content": (
+                            warmup_image_content()
+                            if model_config.is_image_understandable_model
+                            else WARMUP_PROMPT
+                        ),
+                    }
+                ],
                 params={"max_new_tokens": 8, "temperature": 0.0},
             ),
         )

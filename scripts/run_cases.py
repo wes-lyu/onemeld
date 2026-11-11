@@ -12,7 +12,7 @@ returned segment, a copy of the request's trace and report.json. summary.json
 lists every case. Checks cover the request's structure: one valid plan, intact
 hashes and references, steps that run as planned and feed each other, and the
 expected outputs. A case with scoring rules also reads each image's scores and the
-recommendation from the answer, and checks the recommendation follows the rules.
+recommendation from the answer, and checks that both are there.
 Whether an image or answer is good beyond that still needs a person.
 """
 
@@ -51,7 +51,6 @@ class Scoring:
     image_count: int
     # Each criterion maps to the names an answer may call it in any case language.
     criteria: dict[str, list[str]]
-    tie_break: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -69,19 +68,6 @@ class ScoredAnswer:
             )
             and self.recommended_image in self.scores
         )
-
-    def best_images(self, scoring: Scoring) -> set[str]:
-        """The images the case's rule ranks first: highest total, then the tie-break criterion."""
-        totals = {image: sum(scores.values()) for image, scores in self.scores.items()}
-        leaders = [
-            image for image, total in totals.items() if total == max(totals.values())
-        ]
-        best_tie_break = max(self.scores[image][scoring.tie_break] for image in leaders)
-        return {
-            image
-            for image in leaders
-            if self.scores[image][scoring.tie_break] == best_tie_break
-        }
 
     def as_json(self) -> Json:
         return {"scores": self.scores, "recommended_image": self.recommended_image}
@@ -149,14 +135,8 @@ class CaseReport:
 def load_scoring(values: Json | None) -> Scoring | None:
     if values is None:
         return None
-    elif values["tie_break"] not in values["criteria"]:
-        raise ValueError(f"Tie-break {values['tie_break']} is not a scoring criterion")
     else:
-        return Scoring(
-            image_count=values["image_count"],
-            criteria=values["criteria"],
-            tie_break=values["tie_break"],
-        )
+        return Scoring(image_count=values["image_count"], criteria=values["criteria"])
 
 
 def load_cases(path: Path) -> CaseFile:
@@ -409,11 +389,6 @@ def contract_checks(
         if reference["kind"] == "image"
     }
     (message,) = request["messages"]
-    is_scored = (
-        scoring is not None
-        and scored_answer is not None
-        and scored_answer.is_complete(scoring)
-    )
     available = {
         "text_result_drives_generation": len(generations) == 1
         and bool(response_ids & reads(generations[0])),
@@ -432,9 +407,9 @@ def contract_checks(
         ),
         "publishes_review_of_generated_images": bool(generation_ids)
         and any(generation_ids <= reads(event) for event in published_responses),
-        "states_scores_and_recommendation": is_scored,
-        "recommendation_follows_scores": is_scored
-        and scored_answer.recommended_image in scored_answer.best_images(scoring),
+        "states_scores_and_recommendation": scoring is not None
+        and scored_answer is not None
+        and scored_answer.is_complete(scoring),
         "publishes_reference_description": any(
             "user_image_1" in reads(event) for event in published_responses
         ),

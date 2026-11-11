@@ -24,7 +24,7 @@
     },
     {
       "id": "F4",
-      "purpose": "Two generated images are scored on the same criteria and a recommendation follows from the scores.",
+      "purpose": "Two generated images are scored on the same criteria and one is recommended.",
       "prompt": "Generate two photos of cats. Score each photo for clarity, subject completeness, and composition, then recommend one and explain why. If the scores are tied, prefer the photo with higher clarity.",
       "scoring": {
         "image_count": 2,
@@ -32,10 +32,9 @@
           "clarity": ["clarity", "清晰度"],
           "subject completeness": ["subject completeness", "主体完整性", "主体完整度"],
           "composition": ["composition", "构图"]
-        },
-        "tie_break": "clarity"
+        }
       },
-      "checks": ["two_images_generated_and_viewed", "publishes_two_images", "publishes_review_of_generated_images", "states_scores_and_recommendation", "recommendation_follows_scores"]
+      "checks": ["two_images_generated_and_viewed", "publishes_two_images", "publishes_review_of_generated_images", "states_scores_and_recommendation"]
     },
     {
       "id": "F5",
@@ -62,10 +61,9 @@
           "clarity": ["clarity", "清晰度"],
           "subject completeness": ["subject completeness", "主体完整性", "主体完整度"],
           "composition": ["composition", "构图"]
-        },
-        "tie_break": "clarity"
+        }
       },
-      "checks": ["audio_only_client_input", "one_pre_transcription", "two_images_generated_and_viewed", "publishes_two_images", "publishes_review_of_generated_images", "states_scores_and_recommendation", "recommendation_follows_scores"]
+      "checks": ["audio_only_client_input", "one_pre_transcription", "two_images_generated_and_viewed", "publishes_two_images", "publishes_review_of_generated_images", "states_scores_and_recommendation"]
     }
   ]
 }

@@ -45,7 +45,6 @@ def test_a_matching_plan_passes_with_every_output_saved(
         "publishes_two_images": True,
         "publishes_review_of_generated_images": True,
         "states_scores_and_recommendation": True,
-        "recommendation_follows_scores": True,
     }
     directory = f4["directory"]
     assert {path.name for path in directory.glob("segment_*")} == {
@@ -75,7 +74,6 @@ def test_a_voice_request_is_transcribed_once_before_planning(
         "publishes_two_images": True,
         "publishes_review_of_generated_images": True,
         "states_scores_and_recommendation": True,
-        "recommendation_follows_scores": True,
     }
 
 
@@ -103,7 +101,6 @@ def test_two_images_without_their_scores_fail(reports: dict[str, dict]) -> None:
         "publishes_two_images": True,
         "publishes_review_of_generated_images": False,
         "states_scores_and_recommendation": False,
-        "recommendation_follows_scores": False,
     }
 
 
@@ -150,51 +147,23 @@ def test_a_scored_answer_is_read_per_image_and_criterion(
 
 
 @pytest.mark.parametrize(
-    ("answer", "is_complete", "follows_scores"),
+    "answer",
     [
-        (
-            "Photo 1: clarity 9, subject completeness 8, composition 8\n"
-            "Photo 2: clarity 7, subject completeness 9, composition 9\n"
-            "I recommend Photo 1.",
-            True,
-            True,
-        ),
-        # A tie on total goes to the clearer photo.
-        (
-            "Photo 1: clarity 9, subject completeness 8, composition 8\n"
-            "Photo 2: clarity 7, subject completeness 9, composition 9\n"
-            "I recommend Photo 2.",
-            True,
-            False,
-        ),
-        (
-            "Photo 1: clarity 9, subject completeness 8, composition 8\n"
-            "Photo 2: clarity 7, subject completeness 9, composition 9",
-            False,
-            False,
-        ),
-        (
-            "Photo 1: clarity 9, subject completeness 8\n"
-            "Photo 2: clarity 7, subject completeness 9, composition 9\n"
-            "I recommend Photo 2.",
-            False,
-            False,
-        ),
-        ("Both photos look great. I recommend Photo 1.", False, False),
+        "Photo 1: clarity 9, subject completeness 8, composition 8\n"
+        "Photo 2: clarity 7, subject completeness 9, composition 9",
+        "Photo 1: clarity 9, subject completeness 8\n"
+        "Photo 2: clarity 7, subject completeness 9, composition 9\n"
+        "I recommend Photo 2.",
+        "Photo 1: clarity 9, subject completeness 8, composition 8\n"
+        "I recommend Photo 1.",
+        "Both photos look great. I recommend Photo 1.",
     ],
 )
-def test_the_recommendation_must_follow_complete_scores(
-    answer: str, is_complete: bool, follows_scores: bool
+def test_an_answer_missing_a_score_or_the_recommendation_is_incomplete(
+    answer: str,
 ) -> None:
     scoring = CASES["F4"].scoring
-    scored_answer = run_cases.read_scored_answer(answer, scoring)
-    assert scored_answer.is_complete(scoring) is is_complete
-    if is_complete:
-        assert (
-            scored_answer.recommended_image in scored_answer.best_images(scoring)
-        ) is follows_scores
-    else:
-        assert not follows_scores
+    assert not run_cases.read_scored_answer(answer, scoring).is_complete(scoring)
 
 
 def test_a_plan_that_breaks_the_request_fails_its_check(

@@ -145,6 +145,16 @@ def test_two_images_without_their_scores_fail(reports: dict[str, dict]) -> None:
             {"step1": (9, 8, 8), "step2": (10, 9, 10)},
             "step2",
         ),
+        (
+            "**Image 1 Scores:**\n\n- **Clarity:** 9\n  Sharp fur and whiskers.\n\n"
+            "- **Subject Completeness:** 8\n\n- **Composition:** 8\n\n---\n\n"
+            "**Image 2 Scores:**\n\n- **Clarity:** 7\n"
+            "  The lighting is dramatic but not as crisp as in Image 1.\n\n"
+            "- **Subject Completeness:** 9\n\n- **Composition:** 9\n\n"
+            "**Recommendation: Image 1**",
+            {"1": (9, 8, 8), "2": (7, 9, 9)},
+            "1",
+        ),
     ],
 )
 def test_a_scored_answer_is_read_per_image_and_criterion(

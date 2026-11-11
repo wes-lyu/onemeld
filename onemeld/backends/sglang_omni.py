@@ -49,6 +49,13 @@ class SGLangOmniBackend:
         variant = self.spec.args.get("variant")
         if isinstance(config_file, str):
             manager = ConfigManager.from_file(config_file)
+            if manager.config.model_path != self.spec.model:
+                raise ValueError(
+                    f"Backend {self.spec.name!r}: pipeline file {config_file} loads "
+                    f"{manager.config.model_path}, but the backend's model is {self.spec.model}"
+                )
+            else:
+                pass
         elif isinstance(variant, str):
             manager = ConfigManager.from_model_path(self.spec.model, variant=variant)
         else:

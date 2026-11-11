@@ -1,9 +1,16 @@
 # The serve.yaml profile with speech transcription on an SGLang-Omni pipeline.
-# Install: uv pip install -e ".[sglang-omni]"
+# Install: uv pip install -e ".[sglang,sglang-omni]"
+# Run from the repository root, since the ASR backend names its pipeline file
+# by a relative path.
 #
 # Backends sharing a GPU start in the order listed. Each SGLang engine sizes
 # itself from the memory free when it starts, so the small engines go first
 # and SenseNova, which offloads its encoders and VAE to CPU on its own, last.
+#
+# Measured on an RTX 4090 (47.4 GiB usable) after running every validation
+# case three times: the vision model 7.2 GiB with FP8 weights, the SGLang-Omni
+# ASR stage 2.6 GiB, SenseNova 34.4 GiB, and two small worker contexts about
+# 1.2 GiB together, which leaves about 2.5 GiB free.
 model_name: onemeld
 
 backends:
@@ -13,7 +20,8 @@ backends:
     model: Qwen/Qwen3-VL-4B-Instruct
     gpu: 0
     args:
-      mem_fraction_static: 0.19
+      quantization: fp8
+      mem_fraction_static: 0.135
       max_total_tokens: 4096
       context_length: 8192
       max_running_requests: 4
@@ -26,6 +34,9 @@ backends:
     task: transcription
     model: Qwen/Qwen3-ASR-0.6B
     gpu: 0
+    args:
+      # The stage's memory, batching and compile settings live in this file.
+      config: examples/onemeld/qwen3_asr_pipeline.yaml
   generation:
     framework: sglang
     task: image

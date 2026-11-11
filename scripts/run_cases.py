@@ -273,13 +273,11 @@ def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
                 )
             )
         }
-        first_criterion = min(
-            (match.start() for match in positions.values()), default=len(line)
-        )
-        # A label after the first criterion is a comparison, such as "softer than Photo 1".
-        labels = image_labels(line[:first_criterion])
-        if labels:
-            current_image = labels[0]
+        # Only a line that starts with a label, such as "**Image 2 Scores:**", switches
+        # images; a label elsewhere is a comparison, such as "softer than Image 1".
+        heading = IMAGE_LABEL.match(line.lstrip(" \t-*#>•|"))
+        if heading is not None:
+            current_image = image_labels(heading.group(0))[0]
         else:
             pass
         if current_image is not None:

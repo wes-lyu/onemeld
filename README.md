@@ -51,7 +51,7 @@ The script needs `httpx`, which the `test` extra installs. Each case directory u
 
 ## Mix frameworks
 
-[sglang_omni.yaml](examples/onemeld/sglang_omni.yaml) is the same profile with speech transcription on an SGLang-Omni pipeline instead of SGLang. Unlike serve.yaml, it has not been run on a GPU yet. A backend whose framework needs its own environment names that environment's interpreter:
+[sglang_omni.yaml](examples/onemeld/sglang_omni.yaml) is the same profile with speech transcription on SGLang-Omni's Qwen3-ASR pipeline instead of SGLang. The ASR backend names its pipeline file in `args.config`; [qwen3_asr_pipeline.yaml](examples/onemeld/qwen3_asr_pipeline.yaml) sizes the stage to share the GPU, since SGLang-Omni's defaults suit a dedicated one. The file's `model_path` must match the backend's `model`. On an RTX 4090 all nine validation cases passed three rounds in a row with this profile. Run it from the repository root, where the relative pipeline path resolves. A backend whose framework needs its own environment names that environment's interpreter:
 
 ```yaml
 backends:

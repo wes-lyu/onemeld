@@ -20,7 +20,7 @@ from qwen_agent.tools import BaseTool
 
 from onemeld.backends.base import StepResult
 from onemeld.composition.adapter import ScheduledStep, UMMCompositionAdapter
-from onemeld.composition.plan import PLAN_PHASE, UMMStepCall
+from onemeld.composition.plan import PLAN_PHASE, UMMArtifact, UMMStepCall
 from onemeld.composition.types import (
     QueueFullError,
     StepRequest,
@@ -44,8 +44,11 @@ SYSTEM_MESSAGE = (
     "A published result can also be used as a tool input. Use select_results if later "
     "observations change which results should be returned. Preserve the user's subject, "
     "constraints, evaluation criteria and tie-breakers in tool instructions. "
-    "Use tools for requested text and media. After the requested results are ready, "
-    "end with a brief acknowledgement. The service returns the selected tool results."
+    "You see only text, so use tools for media and for anything that needs to see an "
+    "image or hear audio. After the requested results are ready, write your final "
+    "reply. The service returns the selected tool results and then your final reply, "
+    "so write any requested answer that no selected result already holds there, "
+    "without repeating the selected results."
 )
 # The numbered rules the OneMeld planner gets, reworded for a tool loop: a plan step
 # becomes a tool call and a reference becomes input_refs. Nothing else is added.
@@ -73,6 +76,8 @@ PLANNING_RULES = (
     "are published."
 )
 SELECT_RESULTS = "select_results"
+# The agent's last message, returned as text after the selected tool results.
+FINAL_REPLY = "final_reply"
 AGENT_MODES = ("agent", "agent_constrained", "agent_rules")
 
 
@@ -328,7 +333,8 @@ class QwenAgentRun:
             "selected": self.selected,
         }
 
-    def run_controller(self, task_text: str) -> None:
+    def run_controller(self, task_text: str) -> str:
+        """Run the tool loop and return the agent's final reply."""
         tools = [
             CompositionTool(
                 self,
@@ -363,12 +369,18 @@ class QwenAgentRun:
             raise UMMPlanningError(
                 "Qwen-Agent did not finish after the last tool result"
             )
-        elif not self.selected:
-            raise UMMPlanningError(
-                "Qwen-Agent did not select any tool result to return"
-            )
         else:
             pass
+        content = last[-1].content
+        reply = (
+            content
+            if isinstance(content, str)
+            else "".join(item.text or "" for item in content)
+        ).strip()
+        if not self.selected and not reply:
+            raise UMMPlanningError("Qwen-Agent returned no tool result and no reply")
+        else:
+            return reply
 
 
 class QwenAgentOrchestrator(Orchestrator):
@@ -413,8 +425,24 @@ class QwenAgentOrchestrator(Orchestrator):
                 execution = self.adapter.executions[context.execution_id]
                 # The shared adapter also serves the older in-tree Agent mode.
                 execution.agent_steps = None
-                await asyncio.to_thread(run.run_controller, execution.task.text)
-                execution.publish_ids = run.selected
+                reply = await asyncio.to_thread(run.run_controller, execution.task.text)
+                if reply:
+                    execution.artifacts[FINAL_REPLY] = UMMArtifact(
+                        value=reply, action=None
+                    )
+                    self.adapter.emit_trace(
+                        context,
+                        "artifact",
+                        {
+                            "step_id": FINAL_REPLY,
+                            "stage": PLAN_PHASE,
+                            "kind": "text",
+                            "sha256": execution.artifacts[FINAL_REPLY].sha256,
+                        },
+                    )
+                    execution.publish_ids = [*run.selected, FINAL_REPLY]
+                else:
+                    execution.publish_ids = run.selected
                 self.adapter.emit_trace(
                     context,
                     "plan",
@@ -424,7 +452,10 @@ class QwenAgentOrchestrator(Orchestrator):
                             "steps": [
                                 step.model_dump(mode="json") for step in run.steps
                             ],
-                            "final": {"publish": run.selected, "answer": ""},
+                            "final": {
+                                "publish": execution.publish_ids,
+                                "answer": reply,
+                            },
                         },
                     },
                 )

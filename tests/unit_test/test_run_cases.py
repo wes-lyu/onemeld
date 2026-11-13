@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from onemeld.composition.plan import UMMExecutionPlan
+from onemeld.config import load_config
 from onemeld.server import create_app
 from tests.unit_test.fixtures.scripted_backends import scripted_config
 
@@ -429,3 +431,41 @@ def test_heldout_tasks_fit_the_image_limit() -> None:
     limit = json.loads(path.read_text())["limits"]["max_images"]
     case_file = run_cases.load_cases(path)
     assert all(case.deliverables.images <= limit for case in case_file.cases)
+
+
+def test_every_oracle_plan_is_valid_for_the_benchmark_profile() -> None:
+    root = Path(__file__).parents[2]
+    composition = load_config(
+        root / "examples" / "onemeld" / "profile-sglang-48gb.yaml"
+    ).composition
+    path = root / "benchmarks" / "heldout" / "tasks.json"
+    case_file = run_cases.load_cases(path)
+    cases = [
+        *case_file.cases,
+        *(
+            case
+            for case in run_cases.heldout_cases(json.loads(path.read_text()))
+            if case.id in case_file.skipped
+        ),
+    ]
+    assert all(case.oracle_plan is not None for case in cases)
+    for case in cases:
+        inputs = {
+            **{
+                f"user_image_{number}": "image"
+                for number in range(1, len(case.images) + 1)
+            },
+            **({"user_audio_1": "audio"} if case.audio and case.prompt else {}),
+        }
+        plan = UMMExecutionPlan.model_validate(case.oracle_plan)
+        composition.validate_steps(list(plan.steps), inputs)
+        assert any(step.publish for step in plan.steps), case.id
+
+
+def test_a_request_outside_oracle_mode_carries_no_plan() -> None:
+    case_file = run_cases.load_cases(
+        Path(__file__).parents[2] / "benchmarks" / "heldout" / "tasks.json"
+    )
+    case = case_file.cases[0]
+    request = run_cases.build_request(case, case_file)
+    assert "oracle_plan" not in request["stage_params"]["orchestrator"]

@@ -27,6 +27,7 @@ from run_cases import (
 
 MODE_NAMES = {
     "plan": "OneMeld",
+    "oracle": "Hand-written plan",
     "agent": "Agent",
     "agent_constrained": "Agent, constrained calls",
     "agent_rules": "Agent, planning rules",

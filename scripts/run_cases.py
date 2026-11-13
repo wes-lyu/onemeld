@@ -109,6 +109,8 @@ class Case:
     task: str | None = None
     category: str | None = None
     constraints: list[str] = field(default_factory=list)
+    # The hand-written plan that mode oracle runs in place of the planner.
+    oracle_plan: Json | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -217,6 +219,7 @@ def heldout_cases(values: Json) -> list[Case]:
                     task=task["id"],
                     category=task["category"],
                     constraints=spec["constraints"],
+                    oracle_plan=spec.get("oracle_plan"),
                 )
             )
     return cases
@@ -677,6 +680,7 @@ def run_case(
         request["stage_params"]["orchestrator"] = {
             **case_file.options,
             "mode": mode,
+            **({"oracle_plan": case.oracle_plan} if mode == "oracle" else {}),
         }
     else:
         pass
@@ -854,6 +858,10 @@ def compare_modes(
         for case_index, case in enumerate(cases):
             first = (round_number + case_index) % len(modes)
             for mode in [*modes[first:], *modes[:first]]:
+                if mode == "oracle" and case.oracle_plan is None:
+                    continue
+                else:
+                    pass
                 directory = output / f"round-{round_number}" / mode
                 report = run_case(client, case, case_file, trace_root, directory, mode)
                 save_report(report, directory)
@@ -913,7 +921,8 @@ def main() -> None:
     parser.add_argument(
         "--modes",
         help="Comma-separated request modes to run on every case, such as "
-        "plan,agent,agent_constrained. The server must route each one.",
+        "plan,oracle,agent,agent_constrained. The server must route each one; "
+        "oracle runs each case's hand-written plan and skips cases without one.",
     )
     parser.add_argument(
         "--repeat",

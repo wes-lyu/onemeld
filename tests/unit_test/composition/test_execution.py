@@ -340,6 +340,43 @@ async def test_invalid_client_task_never_reaches_planning(
 
 
 @pytest.mark.asyncio
+async def test_an_oracle_plan_runs_without_a_planner_call(
+    composition: UMMCompositionSpec,
+    inline_images: list[InlineImage],
+) -> None:
+    plan = UMMExecutionPlan(
+        steps=[
+            planned(call("photo", "paint"), True),
+            planned(call("review", "inspect", "photo"), True),
+        ]
+    )
+    harness = Harness(composition)
+    await harness.submit(
+        TaskRequest(
+            messages=[{"role": "user", "content": "Draw a cat and check it"}],
+            options={"mode": "oracle", "oracle_plan": plan.model_dump(mode="json")},
+        )
+    )
+    # The planner never receives a request; the image step is the first held.
+    assert harness.held() == {"image_a"}
+    await harness.reply("image_a", image_result(inline_images[0]))
+    await harness.reply("vision_worker", {"text": "The photo shows a cat."})
+    assert [segment["kind"] for segment in await harness.finished()] == [
+        "image",
+        "text",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_oracle_mode_without_a_plan_is_a_client_error(
+    composition: UMMCompositionSpec,
+) -> None:
+    harness = Harness(composition)
+    await harness.submit(task_of("Draw", mode="oracle"))
+    assert "must be set together" in str(harness.error())
+
+
+@pytest.mark.asyncio
 async def test_mode_outside_the_allowed_set_is_a_client_error(
     composition: UMMCompositionSpec,
 ) -> None:

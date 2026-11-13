@@ -1,5 +1,5 @@
 {
-  "about": "Draft held-out tasks, batch 1. Written before any system runs on them and never used to tune a prompt. Each task has a specification for the judge and three paraphrases; variation comes from wording, not reruns. Author of this batch: the experiment drafter. A second person writes at least a third of the final set without seeing either system's prompts.",
+  "about": "Draft held-out tasks, batch 1. Written before any system runs on them and never used to tune a prompt. Each task has a specification for the judge and three paraphrases; variation comes from wording, not reruns. Author of this batch: the experiment drafter. A second person writes at least a third of the final set without seeing either system's prompts. Each text task has an oracle_plan: the correct plan written by hand, run through OneMeld's executor as an upper bound on plan quality. For adaptive tasks it is the plan without a retry, so it is correct only when the first attempt passes.",
   "status": "draft",
   "revisions": [
     {
@@ -76,7 +76,18 @@
         "Generate an image of a red bicycle leaning against a brick wall.",
         "Can you make me a picture of a red bike propped up on a brick wall?",
         "I need one image: a bicycle, red, resting against a wall made of bricks."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A red bicycle leaning against a brick wall.",
+            "input_refs": [],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "S02",
@@ -94,7 +105,18 @@
         "Write a three-line poem about autumn rain.",
         "Give me a short poem, just three lines, on the subject of rain in autumn.",
         "Compose three lines of poetry about rainfall in the fall."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Write a three-line poem about autumn rain.",
+            "input_refs": [],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "S03",
@@ -113,7 +135,20 @@
         "What is in this photo?",
         "Describe the objects you can see in this picture.",
         "Tell me what this image shows."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Describe the objects visible in this photo.",
+            "input_refs": [
+              "user_image_1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "S04",
@@ -132,7 +167,18 @@
         "Paint a watercolor of a mountain lake at dawn, with no people in it.",
         "Make a watercolor-style image of a lake in the mountains at sunrise. Leave people out.",
         "I'd like a dawn scene of an alpine lake as a watercolor painting, and nobody should be in the picture."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A watercolor painting of a mountain lake at dawn, with no people.",
+            "input_refs": [],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "S05",
@@ -150,7 +196,20 @@
         "How many windows can you see on this building?",
         "Count the windows in this photo of a building.",
         "Look at the building in the picture and tell me the number of visible windows."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Count the windows visible on the building in this photo and state the number.",
+            "input_refs": [
+              "user_image_1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "S06",
@@ -168,7 +227,20 @@
         "Transcribe this recording.",
         "Write down what is said in this audio clip.",
         "Please turn this voice recording into text."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "transcribe",
+            "instruction": "Transcribe this recording.",
+            "input_refs": [
+              "user_audio_1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "C01",
@@ -186,7 +258,27 @@
         "Write a short product description for a bamboo desk lamp, then generate a product photo that matches it. Return both.",
         "First draft a few sentences describing a desk lamp made of bamboo. After that, create a product shot based on your description. I want the text and the photo.",
         "I'm selling a bamboo desk lamp. Give me a brief description of it and a matching product image generated from that description."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Write a short product description, three or four sentences, of a bamboo desk lamp: its shape, materials, finish and light.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A product photo of a bamboo desk lamp matching the referenced description, on a plain background.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "C02",
@@ -204,7 +296,27 @@
         "Generate an image of a windmill in a field of red tulips, then check whether the tulips in the image are actually red.",
         "Make a picture of a windmill surrounded by red tulips. Afterwards, look at the picture and tell me if the tulips came out red.",
         "Create a windmill-and-red-tulips scene and then verify the tulip color in the result."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A windmill standing in a field of red tulips.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "respond",
+            "instruction": "Check whether the tulips in this image are red, and say what color they are.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "C03",
@@ -222,7 +334,27 @@
         "Write a recipe card title and three ingredients for a summer salad, then generate a top-down photo of that salad with those ingredients.",
         "Come up with a name and a three-ingredient list for a summer salad. Then make an overhead photo of the salad using exactly those ingredients. Return the card text and the photo.",
         "I want a summer salad idea: a title plus three ingredients. Use them to generate a bird's-eye photo of the dish."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Write a recipe card for a summer salad: a title and exactly three ingredients.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A top-down photo of the summer salad in the referenced recipe card, showing exactly its three ingredients.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "C04",
@@ -241,7 +373,27 @@
         "Design a mascot for a hiking club. Describe the character to yourself in two sentences first, then draw it. Only return the image, not the description.",
         "Make a hiking-club mascot. Plan its look in a short private description, then generate it. I only want to see the picture.",
         "Create a mascot character for a hiking club with no logo. Work out the description first but keep it private; send me just the drawing."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Describe in two sentences a mascot character for a hiking club: its look, outfit and pose. It has no logo.",
+            "input_refs": [],
+            "publish": false
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A mascot character for a hiking club as described, with no logo.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "C05",
@@ -259,7 +411,27 @@
         "Generate a picture of a fox in the snow, then write a two-sentence caption based on what is in the picture.",
         "Create an image of a fox standing in snow. Look at it and write a caption of two sentences describing it.",
         "I need a snowy fox image and a two-sentence caption that describes what the image actually shows."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A fox standing in snow.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "respond",
+            "instruction": "Write a two-sentence caption describing what this image shows.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "C06",
@@ -276,7 +448,27 @@
         "Write three name ideas for a coffee shop, then generate a storefront image using the first name on the sign.",
         "Brainstorm three coffee shop names. Take the first one and make a picture of the shop front with that name on the sign. Return the names and the image.",
         "Suggest three names for a new cafe and then generate an image of its storefront showing the first name."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Write three name ideas for a coffee shop as a numbered list.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A coffee shop storefront whose sign shows the first name in the referenced list.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "J01",
@@ -294,7 +486,35 @@
         "Generate two images of a teapot, one ceramic and one glass. Then say which looks best for a minimalist kitchen and why.",
         "Make two teapot pictures, one in ceramic and one in glass. Compare them and tell me which suits a minimalist kitchen, with a reason.",
         "I'm choosing a teapot for a minimalist kitchen. Show me a ceramic one and a glass one, then pick one and explain."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A ceramic teapot on a plain kitchen counter.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A glass teapot on a plain kitchen counter.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s3",
+            "action": "respond",
+            "instruction": "Image 1 is a ceramic teapot and Image 2 a glass teapot. Say which looks better for a minimalist kitchen and why.",
+            "input_refs": [
+              "s1",
+              "s2"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "J02",
@@ -311,7 +531,35 @@
         "Generate two versions of a city skyline, one at sunset and one at night, then compare their color palettes.",
         "Create a skyline image at sunset and another at night. Afterwards, describe how the colors differ between them.",
         "Make two city skyline pictures, sunset and night, and give me a comparison of the colors in each."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A city skyline at sunset.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A city skyline at night.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s3",
+            "action": "respond",
+            "instruction": "Compare the color palettes of these two skyline images: Image 1 at sunset and Image 2 at night.",
+            "input_refs": [
+              "s1",
+              "s2"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "J03",
@@ -334,7 +582,21 @@
         "Here are two photos of living rooms. Describe each one, then say which has more natural light.",
         "Look at these two living rooms. Give a short description of each and tell me which gets more daylight.",
         "Compare these two living room photos: describe both, then pick the one with more natural light."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Describe each of these two living room photos, then say which has more natural light.",
+            "input_refs": [
+              "user_image_1",
+              "user_image_2"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "J04",
@@ -363,7 +625,35 @@
         "Generate two book cover concepts for a mystery novel called The Quiet Harbor. Rate each from 1 to 5 for mood and readability, then pick one. If they tie, pick the more readable one.",
         "Make two cover designs for a mystery book titled The Quiet Harbor. Give each a 1-5 score for mood and for readability, and recommend one; break ties on readability.",
         "I need two candidate covers for my mystery novel, The Quiet Harbor. Score both on mood and readability out of 5 and tell me which to use. On a tie, readability wins."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A book cover for a mystery novel titled The Quiet Harbor.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A different book cover design for a mystery novel titled The Quiet Harbor.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s3",
+            "action": "respond",
+            "instruction": "Rate each of these two book covers from 1 to 5 for mood and for readability, labelling them Image 1 and Image 2, then recommend one and say why. If the scores tie, recommend the more readable one.",
+            "input_refs": [
+              "s1",
+              "s2"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "J05",
@@ -381,7 +671,35 @@
         "Write a haiku about the sea and a haiku about the forest, then generate one image that combines both scenes.",
         "Give me two haiku, one on the ocean and one on a forest. Then make a single picture that brings both scenes together.",
         "Compose a sea haiku and a forest haiku, and create one image where the forest meets the sea, inspired by both."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Write a haiku about the sea.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "respond",
+            "instruction": "Write a haiku about the forest.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s3",
+            "action": "generate_image",
+            "instruction": "One image of a place where a forest meets the sea, inspired by the two referenced haiku.",
+            "input_refs": [
+              "s1",
+              "s2"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "J06",
@@ -398,7 +716,35 @@
         "Generate an image of a dog and a separate image of a cat, both sitting on the same blue sofa. Then check whether the sofa looks the same in both.",
         "Make two pictures: a dog on a blue sofa and a cat on that same blue sofa. Afterwards, tell me if the sofa is consistent between them.",
         "Create a dog-on-blue-sofa image and a cat-on-blue-sofa image, then compare the two sofas and say whether they match."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A dog sitting on a blue velvet three-seat sofa with wooden legs.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A cat sitting on a blue velvet three-seat sofa with wooden legs.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s3",
+            "action": "respond",
+            "instruction": "Check whether the sofa looks the same in Image 1 and Image 2, and explain any differences.",
+            "input_refs": [
+              "s1",
+              "s2"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "R01",
@@ -417,7 +763,29 @@
         "Using the color palette of this image, generate a picture of a sailboat.",
         "Take the colors from this picture and make an image of a sailboat with them.",
         "Make me a sailboat image that uses the same colors as this one."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Describe the color palette of this image: its main colors and their tones, not its subject.",
+            "input_refs": [
+              "user_image_1"
+            ],
+            "publish": false
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A sailboat on the water, painted in the referenced color palette.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "R02",
@@ -435,7 +803,29 @@
         "Describe what this sketch shows, then generate a finished color illustration of it.",
         "Here is a rough pencil sketch. Tell me what it depicts and turn it into a full-color illustration.",
         "Look at my sketch, describe it, and then create a polished colored version."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Describe what this sketch shows: the objects and their layout.",
+            "input_refs": [
+              "user_image_1"
+            ],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A finished full-color illustration of the scene in the referenced description, keeping its layout.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "R03",
@@ -453,7 +843,20 @@
         "Look at this product photo and write an ad headline for it.",
         "Write a catchy advertising headline for the product in this picture.",
         "Based on this photo, come up with a headline I could use in an ad for this product."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Write one catchy ad headline for the product in this photo.",
+            "input_refs": [
+              "user_image_1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "R04",
@@ -472,7 +875,29 @@
         "Generate the same scene as this photo, but in winter with snow. Just return the image.",
         "Make a version of this street in winter, covered in snow. I only need the picture.",
         "Show me what this street would look like after a snowfall in winter. Image only, please."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Describe this street scene in detail: its layout, buildings, shops and objects.",
+            "input_refs": [
+              "user_image_1"
+            ],
+            "publish": false
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "The referenced street scene in winter, with snow on the ground, roofs and parked bicycles.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "R05",
@@ -491,7 +916,29 @@
         "Transcribe this voice memo, then summarize it in one sentence. Only return the summary.",
         "Listen to this recording and give me a one-sentence summary. I don't need the full transcript.",
         "What does this audio say? Answer in a single sentence, without the transcript."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "transcribe",
+            "instruction": "Transcribe this recording.",
+            "input_refs": [
+              "user_audio_1"
+            ],
+            "publish": false
+          },
+          {
+            "id": "s2",
+            "action": "respond",
+            "instruction": "Summarize this transcript in one sentence.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "R06",
@@ -510,7 +957,29 @@
         "Describe the mood of this photo, then generate an image of a forest with the opposite mood. Return both.",
         "What feeling does this picture give off? Tell me, then make a forest scene with the opposite feeling.",
         "Read the atmosphere of this photo and create a forest image whose atmosphere is the reverse. I want the description and the image."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Describe the mood of this photo in one or two sentences.",
+            "input_refs": [
+              "user_image_1"
+            ],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A forest scene whose mood is the opposite of the mood in the referenced description.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "V01",
@@ -608,7 +1077,27 @@
         "Generate a photo of a yellow umbrella on a beach. Check whether the umbrella is yellow; if not, generate it once more. Return the final image and the check.",
         "Make a beach picture with a yellow umbrella. Verify the umbrella's color, and redo the image one time if it isn't yellow. Give me the last image and your check.",
         "I want a yellow beach umbrella image. If the first try doesn't come out yellow, try once more, then return the final one with your verification."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A yellow umbrella on a beach.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "respond",
+            "instruction": "Check whether the umbrella in this image is yellow.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "A02",
@@ -626,7 +1115,27 @@
         "Generate an image of a wall clock showing 3 o'clock. Check what time it shows; if it's wrong, try once more with a corrected instruction. Return the final image and the time you read.",
         "Make a clock picture set to three o'clock, read the time off the image, and regenerate once if it doesn't say 3:00.",
         "Create an image of a clock at 3:00. Verify the hands, retry one time if needed, and tell me what the final image shows."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A wall clock showing exactly 3 o'clock, with the hour hand on 3 and the minute hand on 12.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "respond",
+            "instruction": "Read the time shown on this clock.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "A03",
@@ -646,7 +1155,29 @@
         "Look at this photo. If it contains food, generate a recipe-card image for that food; otherwise just tell me no food was found.",
         "Check whether there's any food in this picture. When there is, make a recipe card image featuring it. When there isn't, say so.",
         "Is there food in this image? If yes, create a recipe-card style picture for it; if no, only answer that there's none."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "respond",
+            "instruction": "Say whether this photo contains food, and name the food.",
+            "input_refs": [
+              "user_image_1"
+            ],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "A recipe-card style image for the food named in the referenced text.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "A04",
@@ -665,7 +1196,27 @@
         "Generate a sun icon for a weather app. Score its clarity from 1 to 5, and if it scores below 3, regenerate it once. Return the final icon and its score.",
         "Make a sun icon for a weather app and rate how clear it is out of 5. Redo it one time only if it gets less than 3.",
         "I need a sun icon for a weather app. Grade its clarity 1-5 and give it one more try if it's below 3. Show me the final icon with its score."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "generate_image",
+            "instruction": "A simple, clear sun icon for a weather app.",
+            "input_refs": [],
+            "publish": true
+          },
+          {
+            "id": "s2",
+            "action": "respond",
+            "instruction": "Score this icon's clarity from 1 to 5 and explain the score.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "A05",
@@ -685,7 +1236,29 @@
         "Listen to this memo. If it asks for an image, generate it; otherwise answer the question in it.",
         "Here's a voice note. Do what it asks: make a picture if it wants one, or answer its question if it asks one.",
         "Transcribe this recording and act on it, creating an image only if one is requested."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "transcribe",
+            "instruction": "Transcribe this recording.",
+            "input_refs": [
+              "user_audio_1"
+            ],
+            "publish": false
+          },
+          {
+            "id": "s2",
+            "action": "respond",
+            "instruction": "Answer the question in this transcript.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     },
     {
       "id": "A06",
@@ -705,7 +1278,29 @@
         "Listen to this memo. If it asks for an image, generate it; otherwise answer the question in it.",
         "Here's a voice note. Do what it asks: make a picture if it wants one, or answer its question if it asks one.",
         "Transcribe this recording and act on it, creating an image only if one is requested."
-      ]
+      ],
+      "oracle_plan": {
+        "steps": [
+          {
+            "id": "s1",
+            "action": "transcribe",
+            "instruction": "Transcribe this recording.",
+            "input_refs": [
+              "user_audio_1"
+            ],
+            "publish": false
+          },
+          {
+            "id": "s2",
+            "action": "generate_image",
+            "instruction": "The picture requested in the referenced transcript.",
+            "input_refs": [
+              "s1"
+            ],
+            "publish": true
+          }
+        ]
+      }
     }
   ]
 }

@@ -155,6 +155,17 @@ class UMMCompositionAdapter:
             self.recorder.record(context.execution_id, "planner_start", {})
         else:
             pass
+        options = execution.task.options
+        if (options.mode == "oracle") != (options.oracle_plan is not None):
+            raise UMMRequestError("Mode oracle and oracle_plan must be set together")
+        elif options.oracle_plan is not None:
+            # The plan goes through the same validation as a planner reply, with no model call.
+            return self.accept_reply(
+                context,
+                {"text": json.dumps(options.oracle_plan), "finish_reason": "stop"},
+            )
+        else:
+            pass
         request = build_planner_request(
             self.composition,
             execution.task.content,

@@ -104,6 +104,86 @@ Limits of this result: 14 valid tasks, one writer who knew both prompts, one pas
 - **Known remaining miss:** per-image reviews in separate segments with no or wrong labels, as in `ablate-minimal-unconstrained` F7, where both reviews say "Image 1". A blind judge is still needed.
 - **Tasks J01, A01 and A04 rewritten to fit `max_images: 2`** (two teapots; one retry; one icon). Version 1 of the three is excluded from results; `revisions` in the task file records why. The task file's `limits.max_images` is now 2, and a test checks every task against it.
 
+## 2026-11-12: rewritten J01, A01 and A04
+
+Run directory on the instance: `/workspace/paper-exp-20261112/runs/heldout-b1-revised`. The three rewritten tasks, three paraphrases each, modes `plan`, `agent` and `agent_rules`, one pass. Hashes in `runs/heldout-b1-revised.frozen.sha256`.
+
+| Task | OneMeld | Agent | Agent, planning rules |
+|---|---:|---:|---:|
+| J01 (two teapots, then pick) | 3/3 | 1/3 | 2/3 automatic, 1/3 by hand |
+| A01 (retry once if not yellow) | 0/3 | 2/3 | 2/3 |
+| A04 (retry the icon once if under 3) | 0/3 | 3/3 | 3/3 |
+
+- **J01:** both agents skipped the comparison on some paraphrases, as on J02, J04 and J06. The agent with rules passed J01-p3 automatically, but its comparison step referenced no images and judged from the instruction text alone, and its answer names `step_1`. Counted as a failure by hand.
+- **A01 and A04:** OneMeld always planned the second image, and returned both, in all six requests. On A04-p2 it wrote the condition into the generator's instruction ("If the previous icon scored less than 3"), which a generator cannot act on. The agents passed A04 because every first icon scored 4 or 5, so no retry was needed. On A01-p3 every system generated two images without a check between them.
+
+Batch 1 with the rewritten tasks, 54 requests, hand-corrected:
+
+| Tasks | OneMeld | Agent | Agent, planning rules |
+|---|---:|---:|---:|
+| All | 46/54 | 36/54 | 42/54 |
+| Not adaptive | 45/45 | 29/45 | 35/45 |
+| Adaptive (A01, A02, A04) | 1/9 | 7/9 | 7/9 |
+
+## 2026-11-13: the agent's final reply is returned
+
+Baseline change: the bridge used to drop the agent's last message and tell the agent to end with an acknowledgement. Traces of the earlier runs showed real answers in that message: S02's poems, C06's names, the F9 and J04 scores and picks, J01's teapot choice. The bridge now returns the final reply as a text segment after the selected tool results (artifact `final_reply`), and the prompt says so and adds that the agent sees only text. A request with no selected result but a reply no longer fails. All agent modes get the change.
+
+Runs: `/workspace/paper-exp-20261112/runs/final-reply-heldout` (54 held-out cases, rewritten tasks) and `final-reply-dev` (F1 to F9), modes `plan`, `agent` and `agent_rules`, one pass, hashes in `runs/final-reply.frozen.sha256`.
+
+Counting text segments is now too lenient, since every agent request returns a reply. Every agent pass that needed the reply was read by hand and classed as:
+
+- **Grounded:** the reply summarizes tool results the agent received (F4, F9, J04-p3). Counted.
+- **Written by the controller:** text it can write without seeing media (C03's ingredients, C06's names). Counted.
+- **After the fact:** a design that was asked for before generation and written after it (F1, F5, F8, C01-p3). Counted only in the lenient figure.
+- **Ungrounded:** a caption, comparison or check of images the agent never sent to the vision tool (C05, J01, J02, J06, A01-p3, F6), or a reply saying the comparison failed. Not counted.
+
+The score reader also missed complete answers on J04 and F4 (scores written as "Mood Rating: 5" or without image labels); these were read by hand and counted.
+
+| Held-out batch 1, 54 requests | OneMeld | Agent | Agent, planning rules |
+|---|---:|---:|---:|
+| All | 46/54 | 37/54 (38 lenient) | 45/54 |
+| Not adaptive | 45/45 | 31/45 (32 lenient) | 38/45 |
+| Adaptive | 1/9 | 6/9 | 7/9 |
+| Before the fix, not adaptive | 45/45 | 29/45 | 35/45 |
+
+| Development, F1 to F9, one pass | OneMeld | Agent | Agent, planning rules |
+|---|---:|---:|---:|
+| Outcome, hand-read | 9/9 | 5/9 (8 lenient) | 9/9 |
+
+| Cost, held-out | OneMeld | Agent | Agent, planning rules |
+|---|---:|---:|---:|
+| Tokens per request | 1,468 | 3,024 | 4,296 |
+| Tokens per request, the 36 all three passed automatically | 1,393 | 2,598 | 4,065 |
+| Median end to end on those 36 (s) | 10.9 | 9.4 | 12.8 |
+| Tokens per hand-read success | 1,723 | 4,413 | 5,155 |
+
+What changed and what did not:
+
+- The fix closes the development gap for the agent with rules (24/27 before, 9/9 now): F4 and F9 put the recommendation in the final reply.
+- On held-out non-adaptive tasks the agent with rules goes from 35/45 to 38/45. Six of its seven remaining failures share one cause: it writes a comparison or caption of generated images without sending them to the vision tool. In J02, J06 and J01-p2 the vision call was rejected first because the agent guessed IDs such as `image_1` while issuing all calls in one turn; the rejection named the real IDs, and the agent answered from its own instructions instead of retrying.
+- Final replies often name internal IDs (`step_1`), which the trace checks flag.
+
+## 2026-11-13: hand-written plans as an upper bound
+
+New request mode `oracle`: the request carries a hand-written plan (`oracle_plan`), which goes through the same validation and execution as a planner reply with no planner call. Every held-out text task has one in `benchmarks/heldout/tasks.json`; a voice task uses the plan of the task it speaks. For adaptive tasks the hand-written plan has no retry, so it is correct only when the first attempt passes. The plans were written after the earlier held-out runs had been read, so they are an upper bound, not a blind baseline.
+
+Run: `/workspace/paper-exp-20261112/runs/oracle-heldout`, modes `plan` and `oracle`, 54 cases, one pass, hashes in `runs/oracle.frozen.sha256`.
+
+| Held-out, 54 requests, hand-read | OneMeld | Hand-written plan |
+|---|---:|---:|
+| Not adaptive | 45/45 | 45/45 |
+| Adaptive | 1/9 | 9/9 |
+| Control calls per request | 1.00 | 0 |
+| Tokens per request, the 45 both passed | 1,356 | 462 |
+| Median end to end on those 45 (s) | 10.9 | 5.4 |
+
+- **On non-adaptive tasks OneMeld matches the hand-written plans.** Pass/fail shows no loss from planning there, so this benchmark cannot separate OneMeld from the ceiling; the agent gap is the agent's own failures.
+- **The adaptive tasks never needed a retry.** Every first umbrella, clock and icon passed its check, so the plan without a retry was correct on all nine. OneMeld failed them only by always planning the retry. A useful adaptive task needs a first attempt that reliably fails.
+- **Instruction quality differs where pass/fail cannot see it.** The hand-written A02 plan says where the clock hands go and gets 3:00 (checked by eye); OneMeld's earlier A02 plans got 12:10 and 3:50.
+- **Planning costs about half the latency on these tasks.** The single planner call accounts for 5.5 s of the 10.9 s median and about two thirds of OneMeld's tokens.
+- The three paraphrases of a task share one hand-written plan, so they produce identical outputs; the oracle has 18 independent tasks here, not 54.
+
 ## What the current bridge gives the agent
 
 - **Tools:** one per capability (`respond`, `generate_image`, `transcribe`) plus `select_results`. Every tool takes `instruction`, `input_refs` and `publish`.

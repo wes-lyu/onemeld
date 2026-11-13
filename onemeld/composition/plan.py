@@ -213,7 +213,11 @@ class UMMRequestOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    mode: Literal["plan", "agent", "agent_constrained", "agent_rules"] | None = None
+    mode: (
+        Literal["plan", "oracle", "agent", "agent_constrained", "agent_rules"] | None
+    ) = None
+    # Benchmark upper bound: with mode oracle, this hand-written plan replaces the planner.
+    oracle_plan: dict[str, JsonValue] | None = None
     image_base64: str | None = None
     max_new_tokens: int | None = Field(default=None, ge=1)
     planning_max_new_tokens: int | None = Field(default=None, ge=256)

@@ -164,7 +164,9 @@ What changed and what did not:
 - On held-out non-adaptive tasks the agent with rules goes from 35/45 to 38/45. Six of its seven remaining failures share one cause: it writes a comparison or caption of generated images without sending them to the vision tool. In J02, J06 and J01-p2 the vision call was rejected first because the agent guessed IDs such as `image_1` while issuing all calls in one turn; the rejection named the real IDs, and the agent answered from its own instructions instead of retrying.
 - Final replies often name internal IDs (`step_1`), which the trace checks flag.
 
-## 2026-11-13: hand-written plans as an upper bound
+## 2026-11-13: hand-written plans as an upper bound (side run)
+
+Not part of the paper's results: on this task set the hand-written plans and OneMeld both reach the ceiling, so the comparison adds no evidence. The `oracle` mode stays in the code for a harder batch.
 
 New request mode `oracle`: the request carries a hand-written plan (`oracle_plan`), which goes through the same validation and execution as a planner reply with no planner call. Every held-out text task has one in `benchmarks/heldout/tasks.json`; a voice task uses the plan of the task it speaks. For adaptive tasks the hand-written plan has no retry, so it is correct only when the first attempt passes. The plans were written after the earlier held-out runs had been read, so they are an upper bound, not a blind baseline.
 

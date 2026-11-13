@@ -7,19 +7,21 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from typing import Protocol
 
 from pydantic import JsonValue
 
 from onemeld.backends.base import StepResult, StepRunner
 from onemeld.composition.adapter import UMMCompositionAdapter
-from onemeld.composition.plan import UMMCompositionSpec
+from onemeld.composition.plan import PLAN_PHASE, UMMCompositionSpec
 from onemeld.composition.types import (
     CloseReason,
     QueueFullError,
     TaskRequest,
     UMMContext,
     UMMDeadlineError,
+    UMMDispatch,
     UMMLimits,
     UMMOutput,
     UMMRequestError,
@@ -196,9 +198,39 @@ class Orchestrator:
         for dispatch in step.dispatches:
             index = limits.max_dispatches - context.remaining_dispatches
             context.remaining_dispatches -= 1
-            backend = self.backends[self.phases[dispatch.phase]]
-            started = asyncio.create_task(
-                backend.run(f"{context.execution_id}-{index}", dispatch.request)
-            )
+            started = asyncio.create_task(self.run_backend(context, dispatch, index))
             running[started] = dispatch.phase
         return segments
+
+    async def run_backend(
+        self, context: UMMContext, dispatch: UMMDispatch, dispatch_number: int
+    ) -> StepResult:
+        backend_name = self.phases[dispatch.phase]
+        backend = self.backends[backend_name]
+        request_id = f"{context.execution_id}-{dispatch_number}"
+        recorder = self.adapter.recorder
+        if recorder is None:
+            return await backend.run(request_id, dispatch.request)
+        else:
+            pass
+        started_ns = time.monotonic_ns()
+        result: StepResult | None = None
+        try:
+            result = await backend.run(
+                request_id, replace(dispatch.request, measure=True)
+            )
+            return result
+        finally:
+            recorder.record(
+                context.execution_id,
+                "model_call",
+                {
+                    "request_id": request_id,
+                    "role": "control" if dispatch.phase == PLAN_PHASE else "tool",
+                    "backend": backend_name,
+                    "elapsed_ns": time.monotonic_ns() - started_ns,
+                    "backend_elapsed_ns": (result or {}).get("backend_elapsed_ns"),
+                    "usage": (result or {}).get("usage"),
+                    "returned": result is not None,
+                },
+            )

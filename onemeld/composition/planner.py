@@ -8,9 +8,11 @@ from pydantic import JsonValue
 
 from onemeld.composition.plan import (
     ContentPart,
+    UMMAgentTurn,
     UMMArtifact,
     UMMCompositionSpec,
     UMMExecutionPlan,
+    UMMStepCall,
 )
 from onemeld.composition.types import StepRequest
 
@@ -21,10 +23,14 @@ SHARED_RULES = (
     "Choose the actions and their number from the user's request. Preserve every requested computation and "
     "its dependencies, including intermediate text the user does not want displayed. Never perform a "
     "step's computation yourself or invent its result. Each media-producing step makes exactly one item; "
-    "to make two images, plan two steps with a prompt each. A step may reference client inputs, earlier "
-    "results and earlier steps of the same reply in input_refs, never itself; use input_refs=[] when it has "
+    "to make two images, plan two steps with a prompt each. A step may reference {available_results} "
+    "in input_refs, never itself; use input_refs=[] when it has "
     "no dependencies. Independent steps may run in parallel when the execution limit allows it. Referenced kinds must be "
     "accepted by the capability. Use unique lowercase step IDs that do not start with user_."
+)
+MINIMAL_PLAN_RULES = (
+    "Plan the whole task now, before any step runs. Return only JSON matching the schema. "
+    "Set publish=true on each step whose result the user asked to receive."
 )
 PLAN_RULES = (
     "Plan the whole task now, before any step runs. Return only JSON matching the schema. "
@@ -50,6 +56,18 @@ PLAN_RULES = (
     "prohibition is preserved, dependencies point to the needed results, and all requested outputs "
     "are published. Examples show syntax; their steps and publication choices are not defaults."
 )
+AGENT_RULES = (
+    "Act on the user's request one turn at a time. Return only JSON matching the schema. "
+    "Choose only calls ready now. A call may read completed results or original inputs, "
+    "but never another call in this turn. You can issue several independent calls together. "
+    "Use the returned text observations to decide what to do next; media is available by ID. "
+    "Do not invent results. Preserve the user's subject, quantities, constraints and tie-breaking rules. "
+    "A media generator sees only the step instruction and referenced results, so preserve relevant constraints there. "
+    "Set publish to [] to keep working. To finish, list the requested result IDs in publish, "
+    "in the order they should be returned, including written answers and images. "
+    "You can finish in the same turn as the final calls by including their result IDs. "
+    "If you're done with the existing results, return an empty steps list and the publish list."
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -64,6 +82,7 @@ def build_planner_request(
     artifacts: dict[str, UMMArtifact],
     max_new_tokens: int,
     repair: UMMPlanRepair | None,
+    agent_steps: list[UMMStepCall] | None = None,
 ) -> StepRequest:
     """Give the planner the task, input references and available capabilities."""
     capabilities = [
@@ -80,9 +99,20 @@ def build_planner_request(
         }
         for name, capability in composition.capabilities.items()
     ]
+    if agent_steps is None:
+        rules = (
+            PLAN_RULES if composition.planning_rules == "full" else MINIMAL_PLAN_RULES
+        )
+        available_results = (
+            "client inputs, earlier results and earlier steps of the same reply"
+        )
+    else:
+        rules = AGENT_RULES
+        available_results = "client inputs and completed tool results"
+    shared_rules = SHARED_RULES.format(available_results=available_results)
     instruction = (
-        f"You plan a task over independent model capabilities. {PLAN_RULES} "
-        f"{SHARED_RULES} Use at most {composition.max_steps} steps and at most these new media items: "
+        f"You plan a task over independent model capabilities. {rules} "
+        f"{shared_rules} Use at most {composition.max_steps} steps and at most these new media items: "
         f"{json.dumps(composition.media_limits)}. Capabilities: {json.dumps(capabilities, ensure_ascii=False)}"
         f" Available input artifact IDs and kinds: {json.dumps({name: artifact.kind for name, artifact in artifacts.items()})}. "
         "Copy reference IDs exactly; use [] for no dependencies, never an empty string."
@@ -91,6 +121,26 @@ def build_planner_request(
         {"role": "system", "content": instruction},
         {"role": "user", "content": task},
     ]
+    if agent_steps:
+        observations = [
+            {
+                **step.model_dump(mode="json"),
+                "result": (
+                    artifacts[step.id].value
+                    if artifacts[step.id].kind == "text"
+                    else {"kind": artifacts[step.id].kind, "reference": step.id}
+                ),
+            }
+            for step in agent_steps
+        ]
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Completed tool calls and observations: {json.dumps(observations, ensure_ascii=False)}",
+            }
+        )
+    else:
+        pass
     if repair is not None:
         messages.extend(
             [
@@ -103,11 +153,33 @@ def build_planner_request(
         )
     else:
         pass
-    schema = UMMExecutionPlan.model_json_schema()
-    schema["properties"]["steps"]["maxItems"] = composition.max_steps
-    schema["$defs"]["UMMPlanStep"]["properties"]["action"]["enum"] = list(
+    if agent_steps is None:
+        schema = UMMExecutionPlan.model_json_schema()
+        step_type = "UMMPlanStep"
+    else:
+        schema = UMMAgentTurn.model_json_schema()
+        step_type = "UMMStepCall"
+    schema["properties"]["steps"]["maxItems"] = composition.max_steps - len(
+        agent_steps or ()
+    )
+    schema["$defs"][step_type]["properties"]["action"]["enum"] = list(
         composition.capabilities
     )
+    response_format: dict[str, JsonValue] = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "umm_plan_reply" if agent_steps is None else "umm_agent_turn",
+            "strict": True,
+            "schema": schema,
+        },
+    }
+    if composition.planning_constrained_decoding:
+        pass
+    else:
+        messages[0]["content"] = (
+            f"{instruction} Reply with one JSON object and nothing else, matching this "
+            f"JSON schema: {json.dumps(schema, ensure_ascii=False)}"
+        )
     return StepRequest(
         inputs=messages,
         params={
@@ -123,13 +195,10 @@ def build_planner_request(
                 if repair is None
                 else REPAIR_TEMPERATURE
             ),
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "umm_plan_reply",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
+            **(
+                {"response_format": response_format}
+                if composition.planning_constrained_decoding
+                else {}
+            ),
         },
     )

@@ -9,6 +9,7 @@ import pytest
 
 from onemeld.composition.media import InlineImage
 from onemeld.composition.plan import (
+    UMMAgentTurn,
     UMMCompositionSpec,
     UMMExecutionPlan,
     UMMPlanStep,
@@ -36,6 +37,42 @@ def call(step_id: str, action: str, *input_refs: str) -> UMMStepCall:
 
 def planned(step: UMMStepCall, publish: bool) -> UMMPlanStep:
     return UMMPlanStep(**step.model_dump(), publish=publish)
+
+
+@pytest.mark.asyncio
+async def test_agent_waits_for_image_then_passes_it_to_review(
+    composition: UMMCompositionSpec,
+    inline_images: list[InlineImage],
+) -> None:
+    harness = Harness(composition)
+    await harness.submit(task_of("Draw a cat and check the photo", mode="agent"))
+    await harness.reply(
+        "planning_worker",
+        {
+            "text": UMMAgentTurn(
+                steps=[call("photo", "paint")], publish=[]
+            ).model_dump_json()
+        },
+    )
+    assert harness.held() == {"image_a"}
+    await harness.reply("image_a", image_result(inline_images[0]))
+    controller_request = json.dumps(harness.request("planning_worker").inputs)
+    assert '"photo"' in controller_request.replace(r"\"", '"')
+    assert inline_images[0].url not in controller_request
+    await harness.reply(
+        "planning_worker",
+        {
+            "text": UMMAgentTurn(
+                steps=[call("review", "inspect", "photo")], publish=["photo", "review"]
+            ).model_dump_json()
+        },
+    )
+    assert inline_images[0].url in json.dumps(harness.request("vision_worker").inputs)
+    await harness.reply("vision_worker", {"text": "The photo shows a cat."})
+    assert [segment["kind"] for segment in await harness.finished()] == [
+        "image",
+        "text",
+    ]
 
 
 def audio_task(speech_wav: bytes, *, with_text: bool) -> TaskRequest:

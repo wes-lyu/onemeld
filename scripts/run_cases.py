@@ -36,13 +36,25 @@ REQUEST_TIMEOUT_S = 900.0
 HEALTH_TIMEOUT_S = 600.0
 HEALTH_POLL_INTERVAL_S = 3.0
 Json = dict[str, JsonValue]
-RECOMMENDATION_WORDS = ("recommend", "推荐")
+# Words that open a recommendation; the label may follow, or precede within the sentence.
+RECOMMENDATION_WORDS = (
+    "recommend",
+    "winner",
+    "better choice",
+    "best choice",
+    "is preferred",
+    "推荐",
+)
 IMAGE_LABEL = re.compile(
-    r"(?:photo|image|picture|照片|图片)(?:\s*id)?[\s:：#*]*(step\s*\d+|\d+|[一二两])"
+    r"(?:(?:book\s+)?cover\s+)?"
+    r"(?:photo|image|picture|cover|concept|design|option|version|icon|照片|图片|封面|方案)"
+    r"(?:\s*id)?[\s:：#*]*(step\s*\d+|\d+|[一二两])"
     r"|第\s*([一二两\d])\s*张",
     re.IGNORECASE,
 )
+SENTENCE_END = re.compile(r"[.!?。！？\n]")
 CHINESE_DIGITS = {"一": "1", "二": "2", "两": "2"}
+IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -75,14 +87,28 @@ class ScoredAnswer:
 
 
 @dataclass(frozen=True, kw_only=True)
+class Deliverables:
+    """What the user must receive, whichever way a system produced it."""
+
+    min_texts: int
+    images: int
+
+
+@dataclass(frozen=True, kw_only=True)
 class Case:
     id: str
     purpose: str
     checks: list[str]
+    deliverables: Deliverables
     prompt: str | None = None
-    image: str | None = None
+    # Input files, as paths relative to the case file's directory.
+    images: list[str] = field(default_factory=list)
     audio: str | None = None
     scoring: Scoring | None = None
+    # Held-out cases only: one case per paraphrase of a task.
+    task: str | None = None
+    category: str | None = None
+    constraints: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -92,12 +118,16 @@ class CaseFile:
     seed: int
     max_completion_tokens: int
     cases: list[Case]
+    # Cases left out because an input file does not exist yet, with the missing files.
+    skipped: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(kw_only=True)
 class CaseReport:
     case: str
     purpose: str
+    task: str | None = None
+    category: str | None = None
     http_status: int | None = None
     elapsed_seconds: float | None = None
     execution_id: str | None = None
@@ -106,6 +136,14 @@ class CaseReport:
     integrity_errors: list[str] = field(default_factory=list)
     checks: dict[str, bool] = field(default_factory=dict)
     scored_answer: ScoredAnswer | None = None
+    model_calls: list[Json] = field(default_factory=list)
+    control_rejections: int = 0
+    outcome_failures: list[str] = field(default_factory=list)
+
+    @property
+    def outcome_passed(self) -> bool:
+        """Whether the user received every deliverable; ignores how the steps were wired."""
+        return self.http_status == 200 and not self.outcome_failures
 
     @property
     def passed(self) -> bool:
@@ -119,7 +157,11 @@ class CaseReport:
         return {
             "case": self.case,
             "purpose": self.purpose,
+            "task": self.task,
+            "category": self.category,
             "passed": self.passed,
+            "outcome_passed": self.outcome_passed,
+            "outcome_failures": self.outcome_failures,
             "http_status": self.http_status,
             "elapsed_seconds": self.elapsed_seconds,
             "execution_id": self.execution_id,
@@ -127,6 +169,8 @@ class CaseReport:
             "error": self.error,
             "integrity_errors": self.integrity_errors,
             "checks": self.checks,
+            "model_calls": self.model_calls,
+            "control_rejections": self.control_rejections,
             "scored_answer": (
                 self.scored_answer.as_json() if self.scored_answer is not None else None
             ),
@@ -140,8 +184,69 @@ def load_scoring(values: Json | None) -> Scoring | None:
         return Scoring(image_count=values["image_count"], criteria=values["criteria"])
 
 
+def heldout_cases(values: Json) -> list[Case]:
+    """One case per paraphrase; a voice task takes its spec from the text task it speaks."""
+    assets = values["assets"]
+    tasks = {task["id"]: task for task in values["tasks"]}
+
+    def asset_path(name: str) -> str:
+        return assets.get(name, {}).get("path", name)
+
+    cases: list[Case] = []
+    for task in values["tasks"]:
+        spec = tasks[task["spoken_from"]] if "spoken_from" in task else task
+        images = task.get("images", [task["image"]] if "image" in task else [])
+        if "spoken_from" in task:
+            requests = [
+                (None, f"{task['id']}-p{number}.wav")
+                for number in range(1, task["recordings_needed"] + 1)
+            ]
+        else:
+            requests = [(text, task.get("audio")) for text in task["paraphrases"]]
+        for number, (prompt, audio) in enumerate(requests, 1):
+            cases.append(
+                Case(
+                    id=f"{task['id']}-p{number}",
+                    purpose=f"{task['category']}: {'; '.join(spec['constraints'])}",
+                    checks=[],
+                    deliverables=Deliverables(**task["deliverables"]),
+                    prompt=prompt,
+                    images=[asset_path(name) for name in images],
+                    audio=asset_path(audio) if audio is not None else None,
+                    scoring=load_scoring(spec.get("scoring")),
+                    task=task["id"],
+                    category=task["category"],
+                    constraints=spec["constraints"],
+                )
+            )
+    return cases
+
+
+def missing_inputs(case: Case, directory: Path) -> list[str]:
+    names = [*case.images, *([case.audio] if case.audio is not None else [])]
+    return [name for name in names if not (directory / name).is_file()]
+
+
 def load_cases(path: Path) -> CaseFile:
+    """Read the development cases, or a held-out task file with a tasks list."""
     values = json.loads(path.read_text())
+    if "tasks" in values:
+        cases = heldout_cases(values)
+        skipped = {
+            case.id: missing_inputs(case, path.parent)
+            for case in cases
+            if missing_inputs(case, path.parent)
+        }
+        return CaseFile(
+            directory=path.parent,
+            options=values["options"],
+            seed=values["seed"],
+            max_completion_tokens=values["max_completion_tokens"],
+            cases=[case for case in cases if case.id not in skipped],
+            skipped=skipped,
+        )
+    else:
+        pass
     return CaseFile(
         directory=path.parent,
         options=values["options"],
@@ -152,8 +257,9 @@ def load_cases(path: Path) -> CaseFile:
                 id=case["id"],
                 purpose=case["purpose"],
                 checks=case["checks"],
+                deliverables=Deliverables(**case["deliverables"]),
                 prompt=case.get("prompt"),
-                image=case.get("image"),
+                images=[case["image"]] if "image" in case else [],
                 audio=case.get("audio"),
                 scoring=load_scoring(case.get("scoring")),
             )
@@ -168,16 +274,15 @@ def build_request(case: Case, case_file: CaseFile) -> Json:
         content.append({"type": "text", "text": case.prompt})
     else:
         pass
-    if case.image is not None:
-        encoded = base64.b64encode((case_file.directory / case.image).read_bytes())
+    for image in case.images:
+        encoded = base64.b64encode((case_file.directory / image).read_bytes())
+        media_type = IMAGE_MEDIA_TYPES[Path(image).suffix.lower()]
         content.append(
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{encoded.decode()}"},
+                "image_url": {"url": f"data:{media_type};base64,{encoded.decode()}"},
             }
         )
-    else:
-        pass
     if case.audio is not None:
         encoded = base64.b64encode((case_file.directory / case.audio).read_bytes())
         content.append(
@@ -261,6 +366,8 @@ def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
         default=len(lowered),
     )
     scores: dict[str, dict[str, float]] = {}
+    # The words after a heading's label, such as "foggy harbor" in "Cover 1: Foggy Harbor".
+    titles: dict[str, str] = {}
     current_image: str | None = None
     for line in lowered[:recommendation_start].splitlines():
         positions = {
@@ -278,6 +385,15 @@ def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
         heading = IMAGE_LABEL.match(line.lstrip(" \t-*#>•|"))
         if heading is not None:
             current_image = image_labels(heading.group(0))[0]
+            title = re.sub(
+                r"\b(?:scores?|ratings?|evaluation)\b",
+                "",
+                line.lstrip(" \t-*#>•|")[heading.end() :],
+            ).strip(" :：*-—()（）")
+            if len(title) >= 4 and title not in titles.values():
+                titles.setdefault(current_image, title)
+            else:
+                pass
         else:
             pass
         if current_image is not None:
@@ -287,10 +403,50 @@ def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
                 )
         else:
             pass
-    recommended = image_labels(lowered[recommendation_start:])
     return ScoredAnswer(
-        scores=scores, recommended_image=recommended[0] if recommended else None
+        scores=scores,
+        recommended_image=recommended_label(lowered, recommendation_start, titles),
     )
+
+
+def recommended_label(
+    lowered: str, recommendation_start: int, titles: dict[str, str]
+) -> str | None:
+    """The image a recommendation names: after the word in its sentence, then before it.
+
+    So both "Recommendation: Image 2" and "Image 2 is preferred" read as 2. With no
+    label nearby, the first label later on counts, and then a heading's title.
+    """
+    if recommendation_start == len(lowered):
+        return None
+    else:
+        pass
+    rest = lowered[recommendation_start:]
+    sentence_end = SENTENCE_END.search(rest, 1)
+    after = image_labels(rest[: sentence_end.start()] if sentence_end else rest)
+    sentence_start = max(
+        (
+            match.end()
+            for match in SENTENCE_END.finditer(lowered[:recommendation_start])
+        ),
+        default=0,
+    )
+    before = image_labels(lowered[sentence_start:recommendation_start])
+    later = image_labels(rest)
+    if after:
+        return after[0]
+    elif before:
+        return before[-1]
+    elif later:
+        return later[0]
+    else:
+        sentence = lowered[sentence_start:]
+        named = [
+            (sentence.find(title), label)
+            for label, title in titles.items()
+            if title in sentence
+        ]
+        return min(named)[1] if named else None
 
 
 def leaked_step_ids(step_ids: set[str], texts: list[str]) -> list[str]:
@@ -317,8 +473,41 @@ def leaked_step_ids(step_ids: set[str], texts: list[str]) -> list[str]:
     )
 
 
+def outcome_failures(
+    case: Case, segment_kinds: list[str], scored_answer: ScoredAnswer | None
+) -> list[str]:
+    """Deliverables missing from a response, judged on the returned segments alone."""
+    failures: list[str] = []
+    texts = segment_kinds.count("text")
+    images = segment_kinds.count("image")
+    if texts < case.deliverables.min_texts:
+        failures.append(
+            f"returned {texts} text segments, needs at least {case.deliverables.min_texts}"
+        )
+    else:
+        pass
+    if images != case.deliverables.images:
+        failures.append(f"returned {images} images, needs {case.deliverables.images}")
+    else:
+        pass
+    if case.scoring is not None and (
+        scored_answer is None or not scored_answer.is_complete(case.scoring)
+    ):
+        failures.append(
+            "the text lacks a score per image and criterion, or a recommendation"
+        )
+    else:
+        pass
+    return failures
+
+
 def check_integrity(
-    trace: list[Json], plan: Json, artifacts: dict[str, Json], inputs: dict[str, Json]
+    trace: list[Json],
+    plan: Json,
+    artifacts: dict[str, Json],
+    inputs: dict[str, Json],
+    *,
+    allow_repairs: bool = False,
 ) -> tuple[list[str], list[Json]]:
     """Errors in the trace's structure, and the steps it dispatched in order."""
     errors: list[str] = []
@@ -327,7 +516,7 @@ def check_integrity(
         errors.append(f"expected one accepted plan, found {len(plans)}")
     else:
         pass
-    if any(event["event"] == "plan_rejected" for event in trace):
+    if not allow_repairs and any(event["event"] == "plan_rejected" for event in trace):
         errors.append("the planner needed a repair")
     else:
         pass
@@ -399,12 +588,21 @@ def contract_checks(
     def reads(event: Json) -> set[str]:
         return {reference["id"] for reference in event["input_artifacts"]}
 
+    ancestors: dict[str, set[str]] = {}
+    for event in dispatched:
+        direct = reads(event)
+        ancestors[event["step_id"]] = direct.union(
+            *(ancestors[reference] for reference in direct if reference in ancestors)
+        )
     described = {
         event["step_id"] for event in responses if "user_image_1" in reads(event)
     }
     published_responses = [
         event for event in responses if event["step_id"] in published
     ]
+    published_review_inputs = set().union(
+        *(ancestors[event["step_id"]] for event in published_responses)
+    )
     viewed = {
         reference["id"]
         for event in responses
@@ -429,7 +627,7 @@ def contract_checks(
             event["step_id"] in reads(generations[0]) for event in published_responses
         ),
         "publishes_review_of_generated_images": bool(generation_ids)
-        and any(generation_ids <= reads(event) for event in published_responses),
+        and generation_ids <= published_review_inputs,
         "states_scores_and_recommendation": scoring is not None
         and scored_answer is not None
         and scored_answer.is_complete(scoring),
@@ -467,30 +665,50 @@ def run_case(
     case_file: CaseFile,
     trace_root: Path,
     output: Path,
+    mode: str | None = None,
 ) -> CaseReport:
     directory = output / case.id
     directory.mkdir(parents=True)
-    report = CaseReport(case=case.id, purpose=case.purpose)
-    request = build_request(case, case_file)
-    (directory / "request.json").write_text(
-        json.dumps(request, ensure_ascii=False, indent=2)
+    report = CaseReport(
+        case=case.id, purpose=case.purpose, task=case.task, category=case.category
     )
+    request = build_request(case, case_file)
+    if mode is not None:
+        request["stage_params"]["orchestrator"] = {
+            **case_file.options,
+            "mode": mode,
+        }
+    else:
+        pass
+    http_request = client.build_request("POST", "/v1/chat/completions", json=request)
+    (directory / "request.json").write_bytes(http_request.content)
     before = {path.name for path in trace_root.glob("*")}
     started = time.monotonic()
     try:
-        response = client.post("/v1/chat/completions", json=request)
+        response = client.send(http_request)
     except httpx.TransportError as error:
         report.error = str(error)
+        report.elapsed_seconds = round(time.monotonic() - started, 3)
         return report
     report.elapsed_seconds = round(time.monotonic() - started, 3)
     report.http_status = response.status_code
-    (directory / "response.json").write_text(response.text)
+    (directory / "response.json").write_bytes(response.content)
     segments: list[Json] = []
     if response.status_code == 200:
         segments = response.json()["choices"][0]["message"]["segments"]
         report.segment_kinds = [segment["kind"] for segment in segments]
         report.execution_id = segments[0]["execution_id"] if segments else None
         save_segments(segments, directory)
+        if case.scoring is not None:
+            answer = "\n\n".join(
+                segment["data"] for segment in segments if segment["kind"] == "text"
+            )
+            report.scored_answer = read_scored_answer(answer, case.scoring)
+        else:
+            pass
+        report.outcome_failures = outcome_failures(
+            case, report.segment_kinds, report.scored_answer
+        )
     else:
         report.error = response.text
     if report.execution_id is None:
@@ -508,6 +726,10 @@ def run_case(
         json.loads(line)
         for line in (trace_directory / "events.jsonl").read_text().splitlines()
     ]
+    report.model_calls = [event for event in trace if event["event"] == "model_call"]
+    report.control_rejections = sum(
+        event["event"] == "plan_rejected" for event in trace
+    )
     if response.status_code != 200:
         return report
     else:
@@ -518,10 +740,13 @@ def run_case(
         path.stem: json.loads(path.read_text())
         for path in (trace_directory / "artifacts").glob("*.json")
     }
-    errors, dispatched = check_integrity(trace, plan, artifacts, client_inputs(request))
+    errors, dispatched = check_integrity(
+        trace, plan, artifacts, client_inputs(request), allow_repairs=mode is not None
+    )
     publish = plan.get("final", {}).get("publish", [])
     if len(segments) != len(publish) or any(
-        sha256_of(segment["data"], segment["kind"]) != artifacts[reference]["sha256"]
+        reference not in artifacts
+        or sha256_of(segment["data"], segment["kind"]) != artifacts[reference]["sha256"]
         for segment, reference in zip(segments, publish)
     ):
         errors.append("published segments differ from the planned outputs")
@@ -536,13 +761,6 @@ def run_case(
     else:
         pass
     report.integrity_errors = errors
-    if case.scoring is not None:
-        answer = "\n\n".join(
-            segment["data"] for segment in segments if segment["kind"] == "text"
-        )
-        report.scored_answer = read_scored_answer(answer, case.scoring)
-    else:
-        pass
     report.checks = contract_checks(
         case.checks,
         request,
@@ -554,6 +772,29 @@ def run_case(
         report.scored_answer,
     )
     return report
+
+
+def save_report(report: CaseReport, output: Path) -> None:
+    (output / report.case / "report.json").write_text(
+        json.dumps(report.as_json(), ensure_ascii=False, indent=2)
+    )
+    failed = [name for name, passed in report.checks.items() if not passed]
+    problems = [
+        *report.integrity_errors,
+        *(f"check {name}" for name in failed),
+        *(f"outcome: {failure}" for failure in report.outcome_failures),
+    ]
+    if report.error is not None:
+        problems.append(report.error)
+    else:
+        pass
+    print(
+        f"{output.name}/{report.case}: {'PASS' if report.passed else 'FAIL'} "
+        f"outcome={'pass' if report.outcome_passed else 'fail'} "
+        f"http={report.http_status} {report.elapsed_seconds}s "
+        f"segments={report.segment_kinds} {'; '.join(problems)}",
+        flush=True,
+    )
 
 
 def wait_until_healthy(client: httpx.Client) -> None:
@@ -586,22 +827,42 @@ def run_cases(
         else:
             pass
         report = run_case(client, case, case_file, trace_root, output)
-        (output / case.id / "report.json").write_text(
-            json.dumps(report.as_json(), ensure_ascii=False, indent=2)
-        )
+        save_report(report, output)
         reports.append(report)
-        failed = [name for name, passed in report.checks.items() if not passed]
-        problems = [*report.integrity_errors, *(f"check {name}" for name in failed)]
-        print(
-            f"{case.id}: {'PASS' if report.passed else 'FAIL'} "
-            f"http={report.http_status} {report.elapsed_seconds}s "
-            f"segments={report.segment_kinds} {'; '.join(problems)}",
-            flush=True,
-        )
     (output / "summary.json").write_text(
         json.dumps(
             [report.as_json() for report in reports], ensure_ascii=False, indent=2
         )
+    )
+    return reports
+
+
+def compare_modes(
+    client: httpx.Client,
+    case_file: CaseFile,
+    trace_root: Path,
+    output: Path,
+    only: set[str] | None,
+    repeat: int,
+    modes: list[str],
+) -> list[CaseReport]:
+    """Run every case in every mode each round, rotating which mode goes first."""
+    reports: list[CaseReport] = []
+    attempts: list[Json] = []
+    cases = [case for case in case_file.cases if only is None or case.id in only]
+    for round_number in range(1, repeat + 1):
+        for case_index, case in enumerate(cases):
+            first = (round_number + case_index) % len(modes)
+            for mode in [*modes[first:], *modes[:first]]:
+                directory = output / f"round-{round_number}" / mode
+                report = run_case(client, case, case_file, trace_root, directory, mode)
+                save_report(report, directory)
+                reports.append(report)
+                attempts.append(
+                    {"round": round_number, "mode": mode, **report.as_json()}
+                )
+    (output / "summary.json").write_text(
+        json.dumps(attempts, ensure_ascii=False, indent=2)
     )
     return reports
 
@@ -630,7 +891,12 @@ def run_rounds(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--url", default="http://127.0.0.1:8897")
-    parser.add_argument("--cases", type=Path, default=DEFAULT_CASES)
+    parser.add_argument(
+        "--cases",
+        type=Path,
+        default=DEFAULT_CASES,
+        help="A case file, or a held-out task file such as benchmarks/heldout/tasks.json.",
+    )
     parser.add_argument(
         "--trace-dir",
         type=Path,
@@ -639,6 +905,16 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--only", help="Comma-separated case IDs, such as F1,F3.")
+    parser.add_argument(
+        "--compare-agent",
+        action="store_true",
+        help="Pair each plan run with an Agent run; the same as --modes plan,agent.",
+    )
+    parser.add_argument(
+        "--modes",
+        help="Comma-separated request modes to run on every case, such as "
+        "plan,agent,agent_constrained. The server must route each one.",
+    )
     parser.add_argument(
         "--repeat",
         type=int,
@@ -658,14 +934,38 @@ def main() -> None:
         base_url=options.url, timeout=REQUEST_TIMEOUT_S, trust_env=False
     ) as client:
         wait_until_healthy(client)
-        reports = run_rounds(
-            client,
-            load_cases(options.cases),
-            options.trace_dir,
-            options.output,
-            set(options.only.split(",")) if options.only else None,
-            options.repeat,
-        )
+        only = set(options.only.split(",")) if options.only else None
+        case_file = load_cases(options.cases)
+        if case_file.skipped:
+            print(
+                f"Skipping {len(case_file.skipped)} cases with missing inputs: "
+                + ", ".join(
+                    f"{case} ({', '.join(names)})"
+                    for case, names in case_file.skipped.items()
+                ),
+                flush=True,
+            )
+        else:
+            pass
+        if options.modes or options.compare_agent:
+            reports = compare_modes(
+                client,
+                case_file,
+                options.trace_dir,
+                options.output,
+                only,
+                options.repeat,
+                options.modes.split(",") if options.modes else ["plan", "agent"],
+            )
+        else:
+            reports = run_rounds(
+                client,
+                case_file,
+                options.trace_dir,
+                options.output,
+                only,
+                options.repeat,
+            )
     passed = sum(report.passed for report in reports)
     print(f"{passed}/{len(reports)} case runs passed; results in {options.output}")
     sys.exit(0 if passed == len(reports) else 1)

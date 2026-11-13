@@ -30,13 +30,18 @@ class Worker:
         self.running: dict[str, asyncio.Task[None]] = {}
 
     async def execute(self, request_id: str, request: StepRequest) -> None:
+        started_ns = time.monotonic_ns() if request.measure else 0
         try:
             result = await self.backend.run(request_id, request)
             reply: WireMessage = {
                 "kind": "result",
                 "id": request_id,
                 "ok": True,
-                "result": result,
+                "result": (
+                    {**result, "backend_elapsed_ns": time.monotonic_ns() - started_ns}
+                    if request.measure
+                    else result
+                ),
             }
         except asyncio.CancelledError:
             # The orchestrator cancelled this step and awaits no reply.

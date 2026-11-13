@@ -152,6 +152,15 @@ class UMMExecutionPlan(BaseModel):
     steps: list[UMMPlanStep] = Field(min_length=1)
 
 
+class UMMAgentTurn(BaseModel):
+    """Ready calls and an optional final list of result references."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    steps: list[UMMStepCall]
+    publish: list[str]
+
+
 @dataclass(frozen=True, kw_only=True)
 class NormalizedSteps:
     """A plan's steps and their corrected IDs."""
@@ -204,7 +213,7 @@ class UMMRequestOptions(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    mode: Literal["plan"] | None = None
+    mode: Literal["plan", "agent", "agent_constrained", "agent_rules"] | None = None
     image_base64: str | None = None
     max_new_tokens: int | None = Field(default=None, ge=1)
     planning_max_new_tokens: int | None = Field(default=None, ge=256)
@@ -229,6 +238,10 @@ class UMMCompositionSpec(BaseModel):
     planning_max_new_tokens: int = Field(default=1536, ge=256)
     planning_temperature: float = Field(default=0.0, ge=0.0)
     planning_chat_template_kwargs: dict[str, JsonValue] = Field(default_factory=dict)
+    # Ablations: false sends the plan schema as prompt text with no constrained decoding;
+    # minimal drops the numbered planning rules and keeps the plan mechanics.
+    planning_constrained_decoding: bool = True
+    planning_rules: Literal["full", "minimal"] = "full"
     response_max_new_tokens: int = Field(default=1024, ge=1)
     trace: bool = False
     # Directory for per-request trace files; see onemeld.composition.trace.

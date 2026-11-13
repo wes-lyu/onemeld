@@ -30,7 +30,11 @@ def unpack(frame: bytes) -> WireMessage:
 
 
 def pack_request(request: StepRequest) -> WireMessage:
-    return {"inputs": request.inputs, "params": request.params}
+    return {
+        "inputs": request.inputs,
+        "params": request.params,
+        "measure": request.measure,
+    }
 
 
 def unpack_request(value: object) -> StepRequest:
@@ -41,4 +45,8 @@ def unpack_request(value: object) -> StepRequest:
     ):
         raise ValueError(f"Malformed step request {value!r:.200}")
     else:
-        return StepRequest(inputs=value["inputs"], params=value["params"])
+        return StepRequest(
+            inputs=value["inputs"],
+            params=value["params"],
+            measure=value.get("measure") is True,
+        )

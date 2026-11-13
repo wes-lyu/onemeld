@@ -54,7 +54,9 @@ def chat_result(response: Mapping[str, object]) -> StepResult:
     message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     finish_reason = choice.get("finish_reason")
+    usage = response.get("usage")
     return {
         "text": content if isinstance(content, str) else "",
         "finish_reason": finish_reason if isinstance(finish_reason, str) else "stop",
+        **({"usage": usage} if isinstance(usage, dict) else {}),
     }

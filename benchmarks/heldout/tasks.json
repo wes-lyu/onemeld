@@ -1,0 +1,711 @@
+{
+  "about": "Draft held-out tasks, batch 1. Written before any system runs on them and never used to tune a prompt. Each task has a specification for the judge and three paraphrases; variation comes from wording, not reruns. Author of this batch: the experiment drafter. A second person writes at least a third of the final set without seeing either system's prompts.",
+  "status": "draft",
+  "revisions": [
+    {
+      "date": "2026-11-12",
+      "tasks": [
+        "J01",
+        "A01",
+        "A04"
+      ],
+      "reason": "Version 1 could need more images than the profile's max_images of 2: J01 asked for three teapots, A01 allowed two retries, and A04 retried two icons. Version 1 ran once (runs/heldout-b1) and is excluded from results. The rewrite keeps each task's category and intent and changes only the image count."
+    }
+  ],
+  "options": {
+    "width": 512,
+    "height": 512,
+    "steps": 20
+  },
+  "seed": 42,
+  "max_completion_tokens": 1024,
+  "limits": {
+    "max_steps": 6,
+    "max_images": 2,
+    "max_audio_seconds": 30
+  },
+  "assets": {
+    "reference.png": {
+      "path": "../../examples/onemeld/cases/reference.png",
+      "content": "Dev reference image, reused only where its content is not what F2 or F6 ask about."
+    },
+    "kitchen.jpg": {
+      "content": "A home kitchen counter with a bowl of lemons and a cutting board."
+    },
+    "building.jpg": {
+      "content": "Front of a small apartment building with exactly 12 visible windows."
+    },
+    "living-room-a.jpg": {
+      "content": "A living room with a large window and bright daylight."
+    },
+    "living-room-b.jpg": {
+      "content": "A living room lit by lamps, with no window in view."
+    },
+    "sketch.png": {
+      "content": "A pencil sketch of a house on a hill with one tree."
+    },
+    "sneaker.jpg": {
+      "content": "A product photo of one white running shoe on a grey background."
+    },
+    "street.jpg": {
+      "content": "A summer street with shops, parked bicycles and green trees."
+    },
+    "meeting-clip.wav": {
+      "content": "About 15 s of English speech: a reminder that the team meeting moves to Thursday at 10."
+    },
+    "memo-question.wav": {
+      "content": "About 10 s of English speech asking how many days are in a leap year."
+    },
+    "memo-image.wav": {
+      "content": "About 10 s of English speech asking for a picture of a hot-air balloon over a desert."
+    }
+  },
+  "tasks": [
+    {
+      "id": "S01",
+      "category": "single",
+      "deliverables": {
+        "min_texts": 0,
+        "images": 1
+      },
+      "constraints": [
+        "One red bicycle",
+        "Leaning on a brick wall"
+      ],
+      "paraphrases": [
+        "Generate an image of a red bicycle leaning against a brick wall.",
+        "Can you make me a picture of a red bike propped up on a brick wall?",
+        "I need one image: a bicycle, red, resting against a wall made of bricks."
+      ]
+    },
+    {
+      "id": "S02",
+      "category": "single",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": [
+        "Exactly three lines",
+        "About autumn rain",
+        "No image"
+      ],
+      "paraphrases": [
+        "Write a three-line poem about autumn rain.",
+        "Give me a short poem, just three lines, on the subject of rain in autumn.",
+        "Compose three lines of poetry about rainfall in the fall."
+      ]
+    },
+    {
+      "id": "S03",
+      "category": "single",
+      "image": "kitchen.jpg",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": [
+        "Describes the objects in the photo",
+        "Mentions the lemons",
+        "No image"
+      ],
+      "paraphrases": [
+        "What is in this photo?",
+        "Describe the objects you can see in this picture.",
+        "Tell me what this image shows."
+      ]
+    },
+    {
+      "id": "S04",
+      "category": "single",
+      "deliverables": {
+        "min_texts": 0,
+        "images": 1
+      },
+      "constraints": [
+        "Watercolor style",
+        "Mountain lake",
+        "At dawn",
+        "No people"
+      ],
+      "paraphrases": [
+        "Paint a watercolor of a mountain lake at dawn, with no people in it.",
+        "Make a watercolor-style image of a lake in the mountains at sunrise. Leave people out.",
+        "I'd like a dawn scene of an alpine lake as a watercolor painting, and nobody should be in the picture."
+      ]
+    },
+    {
+      "id": "S05",
+      "category": "single",
+      "image": "building.jpg",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": [
+        "States a window count",
+        "Correct answer is 12"
+      ],
+      "paraphrases": [
+        "How many windows can you see on this building?",
+        "Count the windows in this photo of a building.",
+        "Look at the building in the picture and tell me the number of visible windows."
+      ]
+    },
+    {
+      "id": "S06",
+      "category": "single",
+      "audio": "meeting-clip.wav",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": [
+        "Returns the transcript",
+        "Mentions Thursday at 10"
+      ],
+      "paraphrases": [
+        "Transcribe this recording.",
+        "Write down what is said in this audio clip.",
+        "Please turn this voice recording into text."
+      ]
+    },
+    {
+      "id": "C01",
+      "category": "chain",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Product description written first and returned",
+        "Image follows the description",
+        "Bamboo desk lamp"
+      ],
+      "paraphrases": [
+        "Write a short product description for a bamboo desk lamp, then generate a product photo that matches it. Return both.",
+        "First draft a few sentences describing a desk lamp made of bamboo. After that, create a product shot based on your description. I want the text and the photo.",
+        "I'm selling a bamboo desk lamp. Give me a brief description of it and a matching product image generated from that description."
+      ]
+    },
+    {
+      "id": "C02",
+      "category": "chain",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Windmill in a tulip field",
+        "Check states whether the tulips are red",
+        "Check is based on the generated image"
+      ],
+      "paraphrases": [
+        "Generate an image of a windmill in a field of red tulips, then check whether the tulips in the image are actually red.",
+        "Make a picture of a windmill surrounded by red tulips. Afterwards, look at the picture and tell me if the tulips came out red.",
+        "Create a windmill-and-red-tulips scene and then verify the tulip color in the result."
+      ]
+    },
+    {
+      "id": "C03",
+      "category": "chain",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Title and exactly three ingredients written first",
+        "Top-down photo",
+        "Salad shows those ingredients"
+      ],
+      "paraphrases": [
+        "Write a recipe card title and three ingredients for a summer salad, then generate a top-down photo of that salad with those ingredients.",
+        "Come up with a name and a three-ingredient list for a summer salad. Then make an overhead photo of the salad using exactly those ingredients. Return the card text and the photo.",
+        "I want a summer salad idea: a title plus three ingredients. Use them to generate a bird's-eye photo of the dish."
+      ]
+    },
+    {
+      "id": "C04",
+      "category": "chain",
+      "deliverables": {
+        "min_texts": 0,
+        "images": 1
+      },
+      "constraints": [
+        "Character described before drawing",
+        "Description is not returned",
+        "Only the image is returned",
+        "No logo"
+      ],
+      "paraphrases": [
+        "Design a mascot for a hiking club. Describe the character to yourself in two sentences first, then draw it. Only return the image, not the description.",
+        "Make a hiking-club mascot. Plan its look in a short private description, then generate it. I only want to see the picture.",
+        "Create a mascot character for a hiking club with no logo. Work out the description first but keep it private; send me just the drawing."
+      ]
+    },
+    {
+      "id": "C05",
+      "category": "chain",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Fox in snow",
+        "Two-sentence caption",
+        "Caption describes the generated image"
+      ],
+      "paraphrases": [
+        "Generate a picture of a fox in the snow, then write a two-sentence caption based on what is in the picture.",
+        "Create an image of a fox standing in snow. Look at it and write a caption of two sentences describing it.",
+        "I need a snowy fox image and a two-sentence caption that describes what the image actually shows."
+      ]
+    },
+    {
+      "id": "C06",
+      "category": "chain",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Three name ideas written and returned",
+        "Storefront shows the first name on its sign"
+      ],
+      "paraphrases": [
+        "Write three name ideas for a coffee shop, then generate a storefront image using the first name on the sign.",
+        "Brainstorm three coffee shop names. Take the first one and make a picture of the shop front with that name on the sign. Return the names and the image.",
+        "Suggest three names for a new cafe and then generate an image of its storefront showing the first name."
+      ]
+    },
+    {
+      "id": "J01",
+      "category": "fan_out",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 2
+      },
+      "constraints": [
+        "Two teapots: ceramic and glass",
+        "Recommendation for a minimalist kitchen with a reason",
+        "Judgment based on the generated images"
+      ],
+      "paraphrases": [
+        "Generate two images of a teapot, one ceramic and one glass. Then say which looks best for a minimalist kitchen and why.",
+        "Make two teapot pictures, one in ceramic and one in glass. Compare them and tell me which suits a minimalist kitchen, with a reason.",
+        "I'm choosing a teapot for a minimalist kitchen. Show me a ceramic one and a glass one, then pick one and explain."
+      ]
+    },
+    {
+      "id": "J02",
+      "category": "fan_out",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 2
+      },
+      "constraints": [
+        "Same skyline at sunset and at night",
+        "Comparison of color palettes"
+      ],
+      "paraphrases": [
+        "Generate two versions of a city skyline, one at sunset and one at night, then compare their color palettes.",
+        "Create a skyline image at sunset and another at night. Afterwards, describe how the colors differ between them.",
+        "Make two city skyline pictures, sunset and night, and give me a comparison of the colors in each."
+      ]
+    },
+    {
+      "id": "J03",
+      "category": "fan_out",
+      "images": [
+        "living-room-a.jpg",
+        "living-room-b.jpg"
+      ],
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": [
+        "Describes each room",
+        "Says which has more natural light",
+        "Correct answer is the first photo",
+        "No image"
+      ],
+      "paraphrases": [
+        "Here are two photos of living rooms. Describe each one, then say which has more natural light.",
+        "Look at these two living rooms. Give a short description of each and tell me which gets more daylight.",
+        "Compare these two living room photos: describe both, then pick the one with more natural light."
+      ]
+    },
+    {
+      "id": "J04",
+      "category": "fan_out",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 2
+      },
+      "scoring": {
+        "image_count": 2,
+        "criteria": {
+          "mood": [
+            "mood"
+          ],
+          "readability": [
+            "readability"
+          ]
+        }
+      },
+      "constraints": [
+        "Two covers for a mystery novel titled The Quiet Harbor",
+        "Each rated 1 to 5 for mood and readability",
+        "One recommended; a tie goes to better readability"
+      ],
+      "paraphrases": [
+        "Generate two book cover concepts for a mystery novel called The Quiet Harbor. Rate each from 1 to 5 for mood and readability, then pick one. If they tie, pick the more readable one.",
+        "Make two cover designs for a mystery book titled The Quiet Harbor. Give each a 1-5 score for mood and for readability, and recommend one; break ties on readability.",
+        "I need two candidate covers for my mystery novel, The Quiet Harbor. Score both on mood and readability out of 5 and tell me which to use. On a tie, readability wins."
+      ]
+    },
+    {
+      "id": "J05",
+      "category": "fan_out",
+      "deliverables": {
+        "min_texts": 2,
+        "images": 1
+      },
+      "constraints": [
+        "One haiku about the sea",
+        "One haiku about the forest",
+        "One image combining both scenes"
+      ],
+      "paraphrases": [
+        "Write a haiku about the sea and a haiku about the forest, then generate one image that combines both scenes.",
+        "Give me two haiku, one on the ocean and one on a forest. Then make a single picture that brings both scenes together.",
+        "Compose a sea haiku and a forest haiku, and create one image where the forest meets the sea, inspired by both."
+      ]
+    },
+    {
+      "id": "J06",
+      "category": "fan_out",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 2
+      },
+      "constraints": [
+        "A dog and a cat, each on a blue sofa",
+        "Check whether the sofa looks consistent across the two images"
+      ],
+      "paraphrases": [
+        "Generate an image of a dog and a separate image of a cat, both sitting on the same blue sofa. Then check whether the sofa looks the same in both.",
+        "Make two pictures: a dog on a blue sofa and a cat on that same blue sofa. Afterwards, tell me if the sofa is consistent between them.",
+        "Create a dog-on-blue-sofa image and a cat-on-blue-sofa image, then compare the two sofas and say whether they match."
+      ]
+    },
+    {
+      "id": "R01",
+      "category": "reference",
+      "image": "reference.png",
+      "deliverables": {
+        "min_texts": 0,
+        "images": 1
+      },
+      "constraints": [
+        "Sailboat",
+        "Uses the reference image's color palette",
+        "Does not copy the reference subject"
+      ],
+      "paraphrases": [
+        "Using the color palette of this image, generate a picture of a sailboat.",
+        "Take the colors from this picture and make an image of a sailboat with them.",
+        "Make me a sailboat image that uses the same colors as this one."
+      ]
+    },
+    {
+      "id": "R02",
+      "category": "reference",
+      "image": "sketch.png",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Describes the sketch",
+        "Finished color illustration of the same content"
+      ],
+      "paraphrases": [
+        "Describe what this sketch shows, then generate a finished color illustration of it.",
+        "Here is a rough pencil sketch. Tell me what it depicts and turn it into a full-color illustration.",
+        "Look at my sketch, describe it, and then create a polished colored version."
+      ]
+    },
+    {
+      "id": "R03",
+      "category": "reference",
+      "image": "sneaker.jpg",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": [
+        "Ad headline for the product in the photo",
+        "No image"
+      ],
+      "paraphrases": [
+        "Look at this product photo and write an ad headline for it.",
+        "Write a catchy advertising headline for the product in this picture.",
+        "Based on this photo, come up with a headline I could use in an ad for this product."
+      ]
+    },
+    {
+      "id": "R04",
+      "category": "reference",
+      "image": "street.jpg",
+      "deliverables": {
+        "min_texts": 0,
+        "images": 1
+      },
+      "constraints": [
+        "Same street scene",
+        "Winter with snow",
+        "Only the image is returned"
+      ],
+      "paraphrases": [
+        "Generate the same scene as this photo, but in winter with snow. Just return the image.",
+        "Make a version of this street in winter, covered in snow. I only need the picture.",
+        "Show me what this street would look like after a snowfall in winter. Image only, please."
+      ]
+    },
+    {
+      "id": "R05",
+      "category": "reference",
+      "audio": "meeting-clip.wav",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": [
+        "One-sentence summary",
+        "Only the summary is returned, not the transcript",
+        "Mentions the move to Thursday"
+      ],
+      "paraphrases": [
+        "Transcribe this voice memo, then summarize it in one sentence. Only return the summary.",
+        "Listen to this recording and give me a one-sentence summary. I don't need the full transcript.",
+        "What does this audio say? Answer in a single sentence, without the transcript."
+      ]
+    },
+    {
+      "id": "R06",
+      "category": "reference",
+      "image": "kitchen.jpg",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Describes the mood of the photo",
+        "Forest image with the opposite mood",
+        "Both returned"
+      ],
+      "paraphrases": [
+        "Describe the mood of this photo, then generate an image of a forest with the opposite mood. Return both.",
+        "What feeling does this picture give off? Tell me, then make a forest scene with the opposite feeling.",
+        "Read the atmosphere of this photo and create a forest image whose atmosphere is the reverse. I want the description and the image."
+      ]
+    },
+    {
+      "id": "V01",
+      "category": "voice",
+      "spoken_from": "C01",
+      "language": "en",
+      "recordings_needed": 3,
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": "Same as C01",
+      "paraphrases": "Spoken versions of C01's three paraphrases"
+    },
+    {
+      "id": "V02",
+      "category": "voice",
+      "spoken_from": "C01",
+      "language": "zh",
+      "recordings_needed": 3,
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": "Same as C01",
+      "paraphrases": "Mandarin spoken versions of C01's three paraphrases"
+    },
+    {
+      "id": "V03",
+      "category": "voice",
+      "spoken_from": "J04",
+      "language": "en",
+      "recordings_needed": 3,
+      "deliverables": {
+        "min_texts": 1,
+        "images": 2
+      },
+      "constraints": "Same as J04",
+      "paraphrases": "Spoken versions of J04's three paraphrases"
+    },
+    {
+      "id": "V04",
+      "category": "voice",
+      "spoken_from": "J04",
+      "language": "zh",
+      "recordings_needed": 3,
+      "deliverables": {
+        "min_texts": 1,
+        "images": 2
+      },
+      "constraints": "Same as J04",
+      "paraphrases": "Mandarin spoken versions of J04's three paraphrases"
+    },
+    {
+      "id": "V05",
+      "category": "voice",
+      "spoken_from": "S01",
+      "language": "en",
+      "recordings_needed": 3,
+      "deliverables": {
+        "min_texts": 0,
+        "images": 1
+      },
+      "constraints": "Same as S01",
+      "paraphrases": "Spoken versions of S01's three paraphrases"
+    },
+    {
+      "id": "V06",
+      "category": "voice",
+      "spoken_from": "R03",
+      "language": "zh",
+      "image": "sneaker.jpg",
+      "recordings_needed": 3,
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": "Same as R03",
+      "paraphrases": "Mandarin spoken versions of R03's three paraphrases, sent with the photo"
+    },
+    {
+      "id": "A01",
+      "category": "adaptive",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Yellow umbrella on a beach",
+        "Color checked on the generated image",
+        "Regenerated once only if the check fails",
+        "Returns the final image and its check"
+      ],
+      "paraphrases": [
+        "Generate a photo of a yellow umbrella on a beach. Check whether the umbrella is yellow; if not, generate it once more. Return the final image and the check.",
+        "Make a beach picture with a yellow umbrella. Verify the umbrella's color, and redo the image one time if it isn't yellow. Give me the last image and your check.",
+        "I want a yellow beach umbrella image. If the first try doesn't come out yellow, try once more, then return the final one with your verification."
+      ]
+    },
+    {
+      "id": "A02",
+      "category": "adaptive",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Clock showing 3 o'clock",
+        "Time read from the generated image",
+        "One retry with a corrected instruction only if wrong"
+      ],
+      "paraphrases": [
+        "Generate an image of a wall clock showing 3 o'clock. Check what time it shows; if it's wrong, try once more with a corrected instruction. Return the final image and the time you read.",
+        "Make a clock picture set to three o'clock, read the time off the image, and regenerate once if it doesn't say 3:00.",
+        "Create an image of a clock at 3:00. Verify the hands, retry one time if needed, and tell me what the final image shows."
+      ]
+    },
+    {
+      "id": "A03",
+      "category": "adaptive",
+      "image": "kitchen.jpg",
+      "expected_branch": "food found",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "Says whether the photo contains food",
+        "If food: a recipe-card image for that food (lemons)",
+        "If no food: says so and generates nothing"
+      ],
+      "paraphrases": [
+        "Look at this photo. If it contains food, generate a recipe-card image for that food; otherwise just tell me no food was found.",
+        "Check whether there's any food in this picture. When there is, make a recipe card image featuring it. When there isn't, say so.",
+        "Is there food in this image? If yes, create a recipe-card style picture for it; if no, only answer that there's none."
+      ]
+    },
+    {
+      "id": "A04",
+      "category": "adaptive",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 1
+      },
+      "constraints": [
+        "One sun icon for a weather app",
+        "Scored 1 to 5 for clarity",
+        "Regenerated once only if the score is under 3",
+        "Returns the final icon and its score"
+      ],
+      "paraphrases": [
+        "Generate a sun icon for a weather app. Score its clarity from 1 to 5, and if it scores below 3, regenerate it once. Return the final icon and its score.",
+        "Make a sun icon for a weather app and rate how clear it is out of 5. Redo it one time only if it gets less than 3.",
+        "I need a sun icon for a weather app. Grade its clarity 1-5 and give it one more try if it's below 3. Show me the final icon with its score."
+      ]
+    },
+    {
+      "id": "A05",
+      "category": "adaptive",
+      "audio": "memo-question.wav",
+      "expected_branch": "question",
+      "deliverables": {
+        "min_texts": 1,
+        "images": 0
+      },
+      "constraints": [
+        "Transcribes the memo",
+        "If it asks for an image, generates it; otherwise answers the question",
+        "Correct answer is 366"
+      ],
+      "paraphrases": [
+        "Listen to this memo. If it asks for an image, generate it; otherwise answer the question in it.",
+        "Here's a voice note. Do what it asks: make a picture if it wants one, or answer its question if it asks one.",
+        "Transcribe this recording and act on it, creating an image only if one is requested."
+      ]
+    },
+    {
+      "id": "A06",
+      "category": "adaptive",
+      "audio": "memo-image.wav",
+      "expected_branch": "image",
+      "deliverables": {
+        "min_texts": 0,
+        "images": 1
+      },
+      "constraints": [
+        "Transcribes the memo",
+        "Generates a hot-air balloon over a desert",
+        "No extra answer required"
+      ],
+      "paraphrases": [
+        "Listen to this memo. If it asks for an image, generate it; otherwise answer the question in it.",
+        "Here's a voice note. Do what it asks: make a picture if it wants one, or answer its question if it asks one.",
+        "Transcribe this recording and act on it, creating an image only if one is requested."
+      ]
+    }
+  ]
+}

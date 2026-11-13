@@ -39,7 +39,7 @@ def reports(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict]:
 
 
 def test_a_matching_plan_passes_with_every_output_saved(
-    reports: dict[str, dict]
+    reports: dict[str, dict],
 ) -> None:
     f4 = reports["F4"]
     assert f4["passed"], f4
@@ -206,13 +206,45 @@ def test_returned_text_naming_a_step_id_is_caught(text: str, leaked: list[str]) 
 
 
 def test_a_plan_that_breaks_the_request_fails_its_check(
-    reports: dict[str, dict]
+    reports: dict[str, dict],
 ) -> None:
     """F6 asks for a description only, but the scripted planner also generates."""
     f6 = reports["F6"]
     assert not f6["passed"]
     assert f6["checks"]["only_visual_response"] is False
     assert f6["integrity_errors"] == []
+
+
+def test_comparison_can_publish_a_summary_of_individual_image_reviews() -> None:
+    """The returned recommendation can consume separate reviews of the two images."""
+    dispatched = [
+        {"step_id": step_id, "action": action, "input_artifacts": references}
+        for step_id, action, references in (
+            ("left", "generate_image", []),
+            ("right", "generate_image", []),
+            ("review_left", "respond", [{"id": "left", "kind": "image"}]),
+            ("review_right", "respond", [{"id": "right", "kind": "image"}]),
+            (
+                "verdict",
+                "respond",
+                [
+                    {"id": "review_left", "kind": "text"},
+                    {"id": "review_right", "kind": "text"},
+                ],
+            ),
+        )
+    ]
+    checks = run_cases.contract_checks(
+        ["publishes_review_of_generated_images"],
+        {"messages": [{"content": []}]},
+        [],
+        dispatched,
+        ["image", "image", "text"],
+        ["left", "right", "verdict"],
+        None,
+        None,
+    )
+    assert checks == {"publishes_review_of_generated_images": True}
 
 
 def test_a_tampered_artifact_is_an_integrity_error(reports: dict[str, dict]) -> None:
@@ -241,3 +273,159 @@ def test_repeated_rounds_each_keep_their_own_results(tmp_path: Path) -> None:
     for round_number in (1, 2):
         summary = tmp_path / "results" / f"round-{round_number}" / "summary.json"
         assert [entry["case"] for entry in json.loads(summary.read_text())] == ["F4"]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "segment_kinds", "answer", "failures"),
+    [
+        ("F2", ["text", "image"], "", []),
+        ("F1", ["image"], "", ["returned 0 text segments, needs at least 1"]),
+        ("F6", ["text", "image"], "", ["returned 1 images, needs 0"]),
+        (
+            "F4",
+            ["image", "image", "text", "text"],
+            "Photo 1: clarity 9, subject completeness 8, composition 8\n\n"
+            "Photo 2: clarity 9, subject completeness 10, composition 8",
+            ["the text lacks a score per image and criterion, or a recommendation"],
+        ),
+    ],
+)
+def test_outcome_depends_only_on_what_was_returned(
+    case_id: str, segment_kinds: list[str], answer: str, failures: list[str]
+) -> None:
+    case = CASES[case_id]
+    scored_answer = (
+        run_cases.read_scored_answer(answer, case.scoring)
+        if case.scoring is not None
+        else None
+    )
+    assert run_cases.outcome_failures(case, segment_kinds, scored_answer) == failures
+
+
+def test_a_passing_case_also_passes_on_outcome(reports: dict[str, dict]) -> None:
+    assert reports["F4"]["outcome_passed"] and reports["F4"]["outcome_failures"] == []
+
+
+def write_heldout(directory: Path) -> Path:
+    (directory / "photo.jpg").write_bytes(b"jpeg bytes")
+    path = directory / "tasks.json"
+    path.write_text(
+        json.dumps(
+            {
+                "options": {},
+                "seed": 1,
+                "max_completion_tokens": 64,
+                "assets": {"shared.png": {"path": "photo.jpg"}},
+                "tasks": [
+                    {
+                        "id": "T1",
+                        "category": "chain",
+                        "image": "shared.png",
+                        "deliverables": {"min_texts": 1, "images": 1},
+                        "constraints": ["A cafe"],
+                        "paraphrases": ["one", "two", "three"],
+                    },
+                    {
+                        "id": "T2",
+                        "category": "reference",
+                        "image": "absent.jpg",
+                        "deliverables": {"min_texts": 1, "images": 0},
+                        "constraints": ["A headline"],
+                        "paraphrases": ["one", "two", "three"],
+                    },
+                    {
+                        "id": "V1",
+                        "category": "voice",
+                        "spoken_from": "T1",
+                        "recordings_needed": 3,
+                        "deliverables": {"min_texts": 1, "images": 1},
+                    },
+                ],
+            }
+        )
+    )
+    (directory / "V1-p2.wav").write_bytes(b"wav bytes")
+    return path
+
+
+def test_heldout_tasks_become_one_case_per_paraphrase(tmp_path: Path) -> None:
+    case_file = run_cases.load_cases(write_heldout(tmp_path))
+    cases = {case.id: case for case in case_file.cases}
+    assert sorted(cases) == ["T1-p1", "T1-p2", "T1-p3", "V1-p2"]
+    assert [cases[f"T1-p{number}"].prompt for number in (1, 2, 3)] == [
+        "one",
+        "two",
+        "three",
+    ]
+    assert cases["V1-p2"].prompt is None and cases["V1-p2"].audio == "V1-p2.wav"
+    assert cases["V1-p2"].constraints == ["A cafe"]
+    assert cases["V1-p2"].category == "voice" and cases["V1-p2"].task == "V1"
+    assert case_file.skipped == {
+        "T2-p1": ["absent.jpg"],
+        "T2-p2": ["absent.jpg"],
+        "T2-p3": ["absent.jpg"],
+        "V1-p1": ["V1-p1.wav"],
+        "V1-p3": ["V1-p3.wav"],
+    }
+
+
+def test_a_heldout_image_is_sent_with_its_own_media_type(tmp_path: Path) -> None:
+    case_file = run_cases.load_cases(write_heldout(tmp_path))
+    request = run_cases.build_request(case_file.cases[0], case_file)
+    image = request["messages"][0]["content"][1]["image_url"]["url"]
+    assert image.startswith("data:image/jpeg;base64,")
+
+
+def test_the_heldout_draft_loads() -> None:
+    path = Path(__file__).parents[2] / "benchmarks" / "heldout" / "tasks.json"
+    case_file = run_cases.load_cases(path)
+    every_case = [*(case.id for case in case_file.cases), *case_file.skipped]
+    assert len(every_case) == len(set(every_case)) == 108
+
+
+COVER_SCORING = run_cases.Scoring(
+    image_count=2, criteria={"mood": ["mood"], "readability": ["readability"]}
+)
+
+
+@pytest.mark.parametrize(
+    ("answer", "recommended_image"),
+    [
+        (
+            "**Cover Concept 1: Foggy Harbor**\n* **Mood: 5/5**\n* **Readability: 4/5**\n\n"
+            "**Cover Concept 2: Cracked Key**\n* **Mood: 4/5**\n* **Readability: 5/5**\n\n"
+            "On a tie, pick the more readable one. Therefore, the Cracked Key cover is "
+            "the winner.",
+            "2",
+        ),
+        (
+            "**Cover 1 (Moody):**\n- **Mood:** 5/5\n- **Readability:** 3/5\n\n"
+            "**Cover 2 (Clear):**\n- **Mood:** 2/5\n- **Readability:** 5/5\n\n"
+            "**Winner: Cover 2 (Clear)**",
+            "2",
+        ),
+        (
+            "Image 1: mood 4, readability 4\nImage 2: mood 5, readability 4\n"
+            "Image 2 is preferred for its stronger mood.",
+            "2",
+        ),
+        (
+            "Image 1: mood 5, readability 3\nImage 2: mood 3, readability 5\n"
+            "Image 1 has the stronger mood, but I recommend Image 2.",
+            "2",
+        ),
+    ],
+)
+def test_a_recommendation_is_read_by_label_position_or_title(
+    answer: str, recommended_image: str
+) -> None:
+    scored_answer = run_cases.read_scored_answer(answer, COVER_SCORING)
+    assert scored_answer.recommended_image == recommended_image
+    assert scored_answer.is_complete(COVER_SCORING)
+
+
+def test_heldout_tasks_fit_the_image_limit() -> None:
+    path = Path(__file__).parents[2] / "benchmarks" / "heldout" / "tasks.json"
+    limit = json.loads(path.read_text())["limits"]["max_images"]
+    case_file = run_cases.load_cases(path)
+    assert all(case.deliverables.images <= limit for case in case_file.cases)

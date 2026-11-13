@@ -10,6 +10,7 @@ from pydantic import JsonValue
 
 from onemeld.composition.plan import (
     PLAN_PHASE,
+    UMMAgentTurn,
     UMMArtifact,
     UMMCompositionSpec,
     UMMExecutionPlan,
@@ -40,6 +41,7 @@ TraceEvent = Literal[
     "normalized",
     "dispatch",
     "artifact",
+    "agent_turn",
     "input_transcription",
 ]
 
@@ -64,6 +66,7 @@ class CompositionExecution:
     plan_attempts: int = 0
     repair: UMMPlanRepair | None = None
     input_transcription: UMMStepCall | None = None
+    agent_steps: list[UMMStepCall] | None = None
 
 
 class UMMCompositionAdapter:
@@ -108,7 +111,11 @@ class UMMCompositionAdapter:
             task = parse_task(context.task, self.composition)
         except ValueError as error:
             raise UMMRequestError(str(error)) from error
-        execution = CompositionExecution(task=task, artifacts=dict(task.artifacts))
+        execution = CompositionExecution(
+            task=task,
+            artifacts=dict(task.artifacts),
+            agent_steps=[] if task.options.mode == "agent" else None,
+        )
         self.executions[context.execution_id] = execution
         if task.audio_instruction_ref is None:
             return self.planner_step(context)
@@ -155,6 +162,7 @@ class UMMCompositionAdapter:
             execution.task.options.planning_max_new_tokens
             or self.composition.planning_max_new_tokens,
             execution.repair,
+            execution.agent_steps,
         )
         return UMMStep(dispatches=(UMMDispatch(PLAN_PHASE, request),))
 
@@ -227,7 +235,10 @@ class UMMCompositionAdapter:
                 )
                 return self.planner_step(context)
         elif phase == PLAN_PHASE:
-            return self.accept_reply(context, result)
+            if execution.agent_steps is None:
+                return self.accept_reply(context, result)
+            else:
+                return self.accept_agent_turn(context, result)
         else:
             scheduled = execution.in_flight.pop(phase, None)
         if scheduled is None:
@@ -268,7 +279,15 @@ class UMMCompositionAdapter:
             if response.finish_reason != "stop":
                 raise ValueError("Planning did not finish; refusing a partial reply")
             else:
-                plan = UMMExecutionPlan.model_validate_json(response.text)
+                # Without constrained decoding a model may wrap the JSON in a code fence.
+                reply = (
+                    response.text
+                    if composition.planning_constrained_decoding
+                    else response.text[
+                        response.text.find("{") : response.text.rfind("}") + 1
+                    ]
+                )
+                plan = UMMExecutionPlan.model_validate_json(reply)
             normalized = normalize_steps(plan_calls(plan), set(execution.artifacts))
             composition.validate_steps(
                 normalized.steps,
@@ -295,26 +314,90 @@ class UMMCompositionAdapter:
             )
         else:
             pass
-        for step in normalized.steps:
+        return self.accept_steps(context, normalized.steps, publish_ids, response.text)
+
+    def accept_agent_turn(self, context: UMMContext, result: object) -> UMMStep:
+        execution = self.executions[context.execution_id]
+        agent_steps = execution.agent_steps
+        assert agent_steps is not None
+        execution.plan_attempts += 1
+        reply_text = ""
+        try:
+            response = NativeTextResult.model_validate(result)
+            reply_text = response.text
+            if response.finish_reason != "stop":
+                raise ValueError("The agent did not finish its tool decision")
+            else:
+                turn = UMMAgentTurn.model_validate_json(response.text)
+            if not turn.steps and not turn.publish:
+                raise ValueError("Choose ready calls or publish at least one result")
+            elif any(
+                not set(step.input_refs) <= execution.artifacts.keys()
+                for step in turn.steps
+            ):
+                raise ValueError("Agent calls can only read already completed results")
+            else:
+                all_steps = [*agent_steps, *turn.steps]
+            self.composition.validate_steps(
+                all_steps,
+                {
+                    name: artifact.kind
+                    for name, artifact in execution.task.artifacts.items()
+                },
+            )
+            if turn.publish and (
+                len(set(turn.publish)) != len(turn.publish)
+                or not set(turn.publish) <= {step.id for step in all_steps}
+            ):
+                raise ValueError("Publish distinct tool result IDs")
+            elif len(turn.steps) + (not turn.publish) > context.remaining_dispatches:
+                raise ValueError("Agent calls exceed the remaining dispatch budget")
+            else:
+                pass
+        except ValueError as error:
+            return self.reject_reply(context, reply_text, error)
+        execution.agent_steps = all_steps
+        self.emit_trace(
+            context,
+            "agent_turn",
+            {"turn": turn.model_dump(mode="json")},
+        )
+        return self.accept_steps(
+            context, turn.steps, turn.publish or None, response.text
+        )
+
+    def accept_steps(
+        self,
+        context: UMMContext,
+        steps: list[UMMStepCall],
+        publish_ids: list[str] | None,
+        reply_text: str,
+    ) -> UMMStep:
+        execution = self.executions[context.execution_id]
+        composition = self.composition
+        for step in steps:
             execution.pending.append(
                 ScheduledStep(step=step, seed_offset=execution.seeded_steps)
             )
             execution.seeded_steps += (
                 composition.capabilities[step.action].protocol == "image_base64"
             )
-        execution.publish_ids = publish_ids
-        execution.plan_bytes = len(response.text.encode("utf-8"))
+        execution.plan_bytes += len(reply_text.encode("utf-8"))
         execution.repair = None
+        execution.plan_attempts = 0
+        if publish_ids is None:
+            return self.schedule(context)
+        else:
+            execution.publish_ids = publish_ids
+        all_steps = steps if execution.agent_steps is None else execution.agent_steps
         self.emit_trace(
             context,
             "plan",
             {
-                "mode": "plan",
+                "mode": "plan" if execution.agent_steps is None else "agent",
                 "turn": 1,
                 "reply": {
-                    "steps": [
-                        step.model_dump(mode="json") for step in normalized.steps
-                    ],
+                    "steps": [step.model_dump(mode="json") for step in all_steps],
                     "final": {"publish": publish_ids, "answer": ""},
                 },
             },
@@ -409,6 +492,8 @@ class UMMCompositionAdapter:
             return UMMStep(outputs=outputs, dispatches=tuple(dispatches))
         elif execution.in_flight:
             return UMMStep(outputs=outputs)
+        elif execution.agent_steps is not None and not execution.publish_ids:
+            return self.planner_step(context)
         else:
             assert not execution.pending, "an idle request has only ready steps"
             assert execution.published == len(execution.publish_ids)

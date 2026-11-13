@@ -72,6 +72,37 @@ def test_chat_result_reads_text_and_finish_reason() -> None:
     assert chat_result(response) == {"text": "Paris", "finish_reason": "length"}
 
 
+def test_chat_result_preserves_engine_token_counts() -> None:
+    usage = {"prompt_tokens": 321, "completion_tokens": 17, "total_tokens": 338}
+    response = {
+        "choices": [{"message": {"content": "Paris"}, "finish_reason": "stop"}],
+        "usage": usage,
+    }
+    assert chat_result(response)["usage"] == usage
+
+
 def test_chat_error_body_becomes_an_error() -> None:
     with pytest.raises(ValueError, match="context length"):
         chat_result({"object": "error", "error": "Exceeds the context length"})
+
+
+def test_planner_ablations_change_only_the_request(
+    composition: UMMCompositionSpec,
+) -> None:
+    full = build_planner_request(composition, [], {}, 512, None)
+    unconstrained = build_planner_request(
+        composition.model_copy(update={"planning_constrained_decoding": False}),
+        [],
+        {},
+        512,
+        None,
+    )
+    minimal = build_planner_request(
+        composition.model_copy(update={"planning_rules": "minimal"}), [], {}, 512, None
+    )
+    assert "response_format" in full.params
+    assert "response_format" not in unconstrained.params
+    assert "matching this JSON schema" in unconstrained.inputs[0]["content"]
+    assert "Follow these rules in order" in full.inputs[0]["content"]
+    assert "Follow these rules in order" not in minimal.inputs[0]["content"]
+    assert minimal.params["response_format"] == full.params["response_format"]

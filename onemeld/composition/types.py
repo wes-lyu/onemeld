@@ -30,6 +30,7 @@ class StepRequest:
 
     inputs: StepInputs
     params: dict[str, JsonValue] = field(default_factory=dict)
+    measure: bool = False
 
 
 @dataclass(frozen=True)

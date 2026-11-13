@@ -101,6 +101,8 @@ class Case:
     checks: list[str]
     deliverables: Deliverables
     prompt: str | None = None
+    # What a voice-only request says, for a reader who cannot hear the recording.
+    transcript: str | None = None
     # Input files, as paths relative to the case file's directory.
     images: list[str] = field(default_factory=list)
     audio: str | None = None
@@ -200,12 +202,12 @@ def heldout_cases(values: Json) -> list[Case]:
         images = task.get("images", [task["image"]] if "image" in task else [])
         if "spoken_from" in task:
             requests = [
-                (None, f"{task['id']}-p{number}.wav")
-                for number in range(1, task["recordings_needed"] + 1)
+                (None, text, f"{task['id']}-p{number}.wav")
+                for number, text in enumerate(spec["paraphrases"], 1)
             ]
         else:
-            requests = [(text, task.get("audio")) for text in task["paraphrases"]]
-        for number, (prompt, audio) in enumerate(requests, 1):
+            requests = [(text, None, task.get("audio")) for text in task["paraphrases"]]
+        for number, (prompt, transcript, audio) in enumerate(requests, 1):
             cases.append(
                 Case(
                     id=f"{task['id']}-p{number}",
@@ -213,6 +215,7 @@ def heldout_cases(values: Json) -> list[Case]:
                     checks=[],
                     deliverables=Deliverables(**task["deliverables"]),
                     prompt=prompt,
+                    transcript=transcript,
                     images=[asset_path(name) for name in images],
                     audio=asset_path(audio) if audio is not None else None,
                     scoring=load_scoring(spec.get("scoring")),
@@ -262,9 +265,11 @@ def load_cases(path: Path) -> CaseFile:
                 checks=case["checks"],
                 deliverables=Deliverables(**case["deliverables"]),
                 prompt=case.get("prompt"),
+                transcript=case.get("transcript"),
                 images=[case["image"]] if "image" in case else [],
                 audio=case.get("audio"),
                 scoring=load_scoring(case.get("scoring")),
+                constraints=case.get("constraints", []),
             )
             for case in values["cases"]
         ],

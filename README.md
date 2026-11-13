@@ -8,6 +8,19 @@ OneMeld hosts every model itself through a serving framework it imports as a lib
 
 Send text, inline images or short speech instructions to `/v1/chat/completions`. Each request gets a plan. The response contains the selected text and images, with optional streaming through server-sent events. Use `/v1/models` to discover the model name and `/health` to check every backend.
 
+## Benchmark
+
+OneMeld and Qwen-Agent ran six workflows three times on a single 48 GB RTX 4090, using the same models and paired requests.
+
+| Metric | OneMeld | Qwen-Agent |
+|---|---:|---:|
+| Workflow completion | 18/18 | 18/18 |
+| Mean input tokens per request | 1,289 | 5,658 |
+| Mean output tokens per request | 405 | 416 |
+| Median end-to-end latency | 18.45 s | 20.26 s |
+
+On this workload, OneMeld completed the same workflows with **77.2% fewer input tokens** and **8.9% lower median end-to-end latency**. Workflow completion measures whether the required steps ran and the requested outputs were returned. Scoring and recommendation accuracy for F4 and F7 remain open.
+
 ## Run the first example
 
 The [example profile](examples/onemeld/profile-sglang-48gb.yaml) runs three models with SGLang on one 48 GB Linux CUDA GPU, and has been run on an RTX 4090: Qwen3-VL-4B-Instruct plans and answers text and visual tasks, SenseNova-U1.5-8B-MoT generates images, and Qwen3-ASR-0.6B transcribes spoken instructions. SenseNova keeps its DiT on the GPU and offloads its encoders and VAE to CPU on its own, which leaves no room for a separate planner model on that card. To fit, the vision model loads with FP8 weights and the speech model transcribes 30 seconds of audio at startup to reserve its memory before SenseNova starts; the profile's comments list the measured memory per process. With a second GPU, add a dedicated planner backend there and point `composition.planner_stage` at it.

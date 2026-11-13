@@ -25,6 +25,7 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import httpx
@@ -35,6 +36,7 @@ DEFAULT_CASES = REPO_ROOT / "examples" / "onemeld" / "cases" / "cases.json"
 REQUEST_TIMEOUT_S = 900.0
 HEALTH_TIMEOUT_S = 600.0
 HEALTH_POLL_INTERVAL_S = 3.0
+MIN_COPIED_WORDS = 12
 Json = dict[str, JsonValue]
 # Words that open a recommendation; the label may follow, or precede within the sentence.
 RECOMMENDATION_WORDS = (
@@ -53,7 +55,10 @@ IMAGE_LABEL = re.compile(
     re.IGNORECASE,
 )
 SENTENCE_END = re.compile(r"[.!?。！？\n]")
-CHINESE_DIGITS = {"一": "1", "二": "2", "两": "2"}
+IMAGE_ORDINALS = {"一": "1", "二": "2", "两": "2", "first": "1", "second": "2"}
+ORDINAL_IMAGE_LABEL = re.compile(
+    r"\b(first|second)\s+(?:photo|image|picture)\b", re.IGNORECASE
+)
 IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
@@ -152,7 +157,7 @@ class CaseReport:
     @property
     def passed(self) -> bool:
         return (
-            self.http_status == 200
+            self.outcome_passed
             and not self.integrity_errors
             and all(self.checks.values())
         )
@@ -359,15 +364,19 @@ def client_inputs(request: Json) -> dict[str, Json]:
 
 def image_labels(text: str) -> list[str]:
     """Image labels in order of appearance, such as 1 for Photo 1 or step2 for Image step2."""
-    labels: list[str] = []
+    labels: list[tuple[int, str]] = []
     for match in IMAGE_LABEL.finditer(text):
         label = re.sub(r"\s+", "", (match.group(1) or match.group(2)).lower())
-        labels.append(CHINESE_DIGITS.get(label, label))
-    return labels
+        labels.append((match.start(), IMAGE_ORDINALS.get(label, label)))
+    for match in ORDINAL_IMAGE_LABEL.finditer(text):
+        labels.append((match.start(), IMAGE_ORDINALS[match.group(1).lower()]))
+    return [label for _, label in sorted(labels)]
 
 
-def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
-    """Each image's score per criterion, read up to the recommendation, and the image it names."""
+def read_scored_answer(
+    text: str, scoring: Scoring, image_label: str | None = None
+) -> ScoredAnswer:
+    """Each image's score per criterion and the image named in the recommendation."""
     lowered = text.lower()
     recommendation_start = min(
         (lowered.find(word) for word in RECOMMENDATION_WORDS if word in lowered),
@@ -376,8 +385,8 @@ def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
     scores: dict[str, dict[str, float]] = {}
     # The words after a heading's label, such as "foggy harbor" in "Cover 1: Foggy Harbor".
     titles: dict[str, str] = {}
-    current_image: str | None = None
-    for line in lowered[:recommendation_start].splitlines():
+    current_image = image_label
+    for line in lowered.splitlines():
         positions = {
             criterion: match
             for criterion, names in scoring.criteria.items()
@@ -415,6 +424,47 @@ def read_scored_answer(text: str, scoring: Scoring) -> ScoredAnswer:
         scores=scores,
         recommended_image=recommended_label(lowered, recommendation_start, titles),
     )
+
+
+def read_published_scores(
+    answer: ScoredAnswer,
+    scoring: Scoring,
+    dispatched: list[Json],
+    published: list[str],
+    artifacts: dict[str, Json],
+) -> ScoredAnswer:
+    """Label separately published reviews by the actual image each tool received."""
+    if answer.is_complete(scoring) or not all(
+        reference in artifacts for reference in published
+    ):
+        return answer
+    else:
+        pass
+    images = [
+        reference for reference in published if artifacts[reference]["kind"] == "image"
+    ]
+    labels = {reference: str(index) for index, reference in enumerate(images, 1)}
+    scores = {label: dict(criteria) for label, criteria in answer.scores.items()}
+    for event in dispatched:
+        response_id = event["step_id"]
+        if response_id not in published or artifacts[response_id]["kind"] != "text":
+            continue
+        else:
+            pass
+        viewed = {
+            reference["id"]
+            for reference in event["input_artifacts"]
+            if reference["kind"] == "image"
+        }
+        if len(viewed) == 1 and viewed <= labels.keys():
+            (image_id,) = viewed
+            label = labels[image_id]
+            review = read_scored_answer(artifacts[response_id]["value"], scoring, label)
+            for criterion, score in review.scores.get(label, {}).items():
+                scores.setdefault(label, {}).setdefault(criterion, score)
+        else:
+            pass
+    return ScoredAnswer(scores=scores, recommended_image=answer.recommended_image)
 
 
 def recommended_label(
@@ -586,6 +636,7 @@ def contract_checks(
     published: list[str],
     scoring: Scoring | None,
     scored_answer: ScoredAnswer | None,
+    artifacts: dict[str, Json] | None = None,
 ) -> dict[str, bool]:
     """Each named check on the dispatched steps and the published step IDs."""
     generations = [event for event in dispatched if event["action"] == "generate_image"]
@@ -618,21 +669,100 @@ def contract_checks(
         if reference["kind"] == "image"
     }
     (message,) = request["messages"]
+    generation_inputs = reads(generations[0]) if len(generations) == 1 else set()
+    if len(generations) == 1 and artifacts:
+        generation = generations[0]
+        generation_position = trace.index(generation)
+        accepted_plan = next(
+            (event["reply"] for event in trace if event["event"] == "plan"), {}
+        )
+        generation_instruction = next(
+            (
+                step["instruction"]
+                for step in accepted_plan.get("steps", [])
+                if step["id"] == generation["step_id"]
+            ),
+            "",
+        )
+        instruction_words = re.findall(r"\w+", generation_instruction.casefold())
+        request_texts = [
+            part["text"] for part in message["content"] if part["type"] == "text"
+        ]
+        request_texts.extend(
+            event["text"]
+            for event in trace[:generation_position]
+            if event["event"] == "artifact"
+            and event["step_id"] == "user_transcript"
+            and event.get("text")
+        )
+        request_words = re.findall(r"\w+", " ".join(request_texts).casefold())
+        request_overlap = (
+            SequenceMatcher(None, instruction_words, request_words, autojunk=False)
+            .find_longest_match()
+            .size
+        )
+        for event in trace[:generation_position]:
+            if event["event"] != "artifact" or event["step_id"] not in response_ids:
+                continue
+            else:
+                pass
+            response_id = event["step_id"]
+            response_artifact = artifacts.get(response_id)
+            if (
+                response_id in generation_inputs
+                or response_artifact is None
+                or response_artifact["kind"] != "text"
+            ):
+                continue
+            else:
+                pass
+            response_words = re.findall(r"\w+", response_artifact["value"].casefold())
+            copied_words = (
+                SequenceMatcher(None, instruction_words, response_words, autojunk=False)
+                .find_longest_match()
+                .size
+            )
+            if copied_words >= MIN_COPIED_WORDS and copied_words > request_overlap:
+                generation_inputs.add(response_id)
+            else:
+                pass
+    else:
+        pass
+    transcription_positions = [
+        index
+        for index, event in enumerate(trace)
+        if event["event"] == "input_transcription"
+    ]
+    transcript_position = next(
+        (
+            index
+            for index, event in enumerate(trace)
+            if event["event"] == "artifact"
+            and event["step_id"] == "user_transcript"
+            and bool(event.get("text"))
+        ),
+        -1,
+    )
+    first_controller_position = next(
+        (
+            index
+            for index, event in enumerate(trace)
+            if event["event"] == "model_call" and event["role"] == "control"
+        ),
+        -1,
+    )
     available = {
-        "text_result_drives_generation": len(generations) == 1
-        and bool(response_ids & reads(generations[0])),
+        "text_result_drives_generation": bool(response_ids & generation_inputs),
         "publishes_text_and_image": "text" in kinds and "image" in kinds,
         "reference_seen_by_vl": bool(described),
-        "description_drives_generation": len(generations) == 1
-        and bool(described & reads(generations[0])),
+        "description_drives_generation": bool(described & generation_inputs),
         "generated_image_checked": len(generations) == 1
         and any(generations[0]["step_id"] in reads(event) for event in responses),
         "two_images_generated_and_viewed": len(generation_ids) == 2
         and generation_ids <= viewed,
         "publishes_two_images": kinds.count("image") == 2,
-        "publishes_text_that_drove_generation": len(generations) == 1
-        and any(
-            event["step_id"] in reads(generations[0]) for event in published_responses
+        "publishes_text_that_drove_generation": any(
+            event["step_id"] in generation_inputs for event in published_responses
         ),
         "publishes_review_of_generated_images": bool(generation_ids)
         and generation_ids <= published_review_inputs,
@@ -649,10 +779,10 @@ def contract_checks(
         "audio_only_client_input": all(
             part["type"] == "input_audio" for part in message["content"]
         ),
-        "one_pre_transcription": sum(
-            event["event"] == "input_transcription" for event in trace
-        )
-        == 1,
+        "one_pre_transcription": len(transcription_positions) == 1
+        and transcription_positions[0]
+        < transcript_position
+        < first_controller_position,
     }
     unknown = sorted(set(names) - available.keys())
     if unknown:
@@ -770,6 +900,15 @@ def run_case(
     else:
         pass
     report.integrity_errors = errors
+    if case.scoring is not None and report.scored_answer is not None and not errors:
+        report.scored_answer = read_published_scores(
+            report.scored_answer, case.scoring, dispatched, publish, artifacts
+        )
+        report.outcome_failures = outcome_failures(
+            case, report.segment_kinds, report.scored_answer
+        )
+    else:
+        pass
     report.checks = contract_checks(
         case.checks,
         request,
@@ -779,6 +918,7 @@ def run_case(
         publish,
         case.scoring,
         report.scored_answer,
+        artifacts,
     )
     return report
 

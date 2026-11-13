@@ -157,6 +157,12 @@ def test_two_images_without_their_scores_fail(reports: dict[str, dict]) -> None:
             {"1": (9, 8, 8), "2": (7, 9, 9)},
             "1",
         ),
+        (
+            "Image 1评分：\n清晰度：9\n主体完整性：10\n构图：8\n推荐：Image 1\n"
+            "Image 2评分：\n清晰度：2\n主体完整性：6\n构图：3\n推荐：Image 1",
+            {"1": (9, 10, 8), "2": (2, 6, 3)},
+            "1",
+        ),
     ],
 )
 def test_a_scored_answer_is_read_per_image_and_criterion(
@@ -189,6 +195,43 @@ def test_an_answer_missing_a_score_or_the_recommendation_is_incomplete(
 ) -> None:
     scoring = CASES["F4"].scoring
     assert not run_cases.read_scored_answer(answer, scoring).is_complete(scoring)
+
+
+def test_separate_published_scores_are_bound_to_the_images_seen_by_each_call() -> None:
+    scoring = CASES["F4"].scoring
+    scores_left = "Clarity: 9\nSubject completeness: 8\nComposition: 8"
+    scores_right = "Clarity: 7\nSubject completeness: 9\nComposition: 7"
+    answer = run_cases.read_scored_answer(
+        f"{scores_left}\n\n{scores_right}\n\nThe first photo is recommended because it has higher clarity.",
+        scoring,
+    )
+    dispatched = [
+        {
+            "step_id": "review_right",
+            "input_artifacts": [{"id": "right", "kind": "image"}],
+        },
+        {
+            "step_id": "review_left",
+            "input_artifacts": [{"id": "left", "kind": "image"}],
+        },
+    ]
+    artifacts = {
+        "left": {"kind": "image"},
+        "right": {"kind": "image"},
+        "review_left": {"kind": "text", "value": scores_left},
+        "review_right": {"kind": "text", "value": scores_right},
+    }
+    result = run_cases.read_published_scores(
+        answer,
+        scoring,
+        dispatched,
+        ["left", "right", "review_right", "review_left"],
+        artifacts,
+    )
+    assert result.is_complete(scoring)
+    assert result.scores["1"]["clarity"] == 9
+    assert result.scores["2"]["clarity"] == 7
+    assert result.recommended_image == "1"
 
 
 @pytest.mark.parametrize(
@@ -306,6 +349,75 @@ def test_outcome_depends_only_on_what_was_returned(
 
 def test_a_passing_case_also_passes_on_outcome(reports: dict[str, dict]) -> None:
     assert reports["F4"]["outcome_passed"] and reports["F4"]["outcome_failures"] == []
+
+
+def test_missing_deliverables_fail_even_when_workflow_checks_pass() -> None:
+    report = run_cases.CaseReport(case="example", purpose="Return a generated image")
+    report.http_status = 200
+    report.checks = {"image_generation_ran": True}
+    report.outcome_failures = ["returned 0 images, needs 1"]
+    assert not report.passed
+
+
+@pytest.mark.parametrize(
+    ("response_before_generation", "copied_only_from_user", "expected"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+)
+def test_inline_text_dependency_uses_a_completed_result(
+    response_before_generation: bool, copied_only_from_user: bool, expected: bool
+) -> None:
+    design = (
+        "Draw blue mountains behind a silver lake under a sky filled with golden stars."
+    )
+    completion = {"event": "artifact", "step_id": "design"}
+    generation = {
+        "event": "dispatch",
+        "step_id": "poster",
+        "action": "generate_image",
+        "input_artifacts": [],
+    }
+    dispatch = {
+        "event": "dispatch",
+        "step_id": "design",
+        "action": "respond",
+        "input_artifacts": [],
+    }
+    plan = {
+        "event": "plan",
+        "reply": {"steps": [{"id": "poster", "instruction": design}]},
+    }
+    trace = (
+        [dispatch, completion, generation, plan]
+        if response_before_generation
+        else [generation, dispatch, completion, plan]
+    )
+    request = {
+        "messages": [
+            {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": design if copied_only_from_user else "Design a poster.",
+                    }
+                ],
+            }
+        ],
+    }
+    checks = run_cases.contract_checks(
+        ["text_result_drives_generation", "publishes_text_that_drove_generation"],
+        request,
+        trace,
+        [dispatch, generation],
+        ["text", "image"],
+        ["design", "poster"],
+        None,
+        None,
+        {"design": {"kind": "text", "value": design}},
+    )
+    assert checks == {
+        "text_result_drives_generation": expected,
+        "publishes_text_that_drove_generation": expected,
+    }
 
 
 def write_heldout(directory: Path) -> Path:

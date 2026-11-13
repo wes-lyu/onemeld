@@ -3,11 +3,8 @@
 
     python scripts/summarize_runs.py results --cases examples/onemeld/cases/cases.json
 
-Reads the summary.json that run_cases.py --compare-agent writes. Success is the
-outcome verdict, recomputed from the saved segments, beside the trace verdict the
-run recorded. Tokens are split into input and output for control and task calls.
-Every cost and latency figure is given over all requests and over the pairs where
-both modes succeeded, since each view alone is biased.
+Reads the summary.json written by run_cases.py --modes. Workflow completion uses
+the runner's recorded verdict. Output checks are also reported separately.
 """
 
 import argparse
@@ -52,13 +49,16 @@ class Attempt:
     stage_seconds: dict[str, float]
 
     @property
+    def input_tokens(self) -> int:
+        return self.control_input_tokens + self.task_input_tokens
+
+    @property
+    def output_tokens(self) -> int:
+        return self.control_output_tokens + self.task_output_tokens
+
+    @property
     def total_tokens(self) -> int:
-        return (
-            self.control_input_tokens
-            + self.control_output_tokens
-            + self.task_input_tokens
-            + self.task_output_tokens
-        )
+        return self.input_tokens + self.output_tokens
 
 
 def load_attempt(entry: dict, results: Path, case: Case) -> Attempt:
@@ -147,9 +147,49 @@ def summarize(attempts: list[Attempt]) -> str:
     modes = [
         mode for mode in MODE_NAMES if any(attempt.mode == mode for attempt in attempts)
     ]
+    expected_modes = set(modes)
     order = pair(*(MODE_NAMES[mode] for mode in modes))
+    completed_modes: dict[tuple[int, str], set[str]] = defaultdict(set)
+    for attempt in attempts:
+        if attempt.trace_passed:
+            completed_modes[attempt.round_number, attempt.case].add(attempt.mode)
+        else:
+            pass
     lines = [
-        "## Success",
+        "## Workflow completion and paired cost",
+        "",
+        "Workflow completion checks the required calls, dependencies and deliverables. Score and recommendation accuracy is outside this metric.",
+        "",
+        "| Mode | Workflows completed | Matched requests | Mean input tokens | Mean output tokens | Median end-to-end latency (s) |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for mode in modes:
+        chosen = [attempt for attempt in attempts if attempt.mode == mode]
+        matched = [
+            attempt
+            for attempt in chosen
+            if completed_modes[attempt.round_number, attempt.case] == expected_modes
+        ]
+        if matched:
+            input_tokens = statistics.fmean(attempt.input_tokens for attempt in matched)
+            output_tokens = statistics.fmean(
+                attempt.output_tokens for attempt in matched
+            )
+            latency_seconds = statistics.median(
+                attempt.end_to_end_seconds for attempt in matched
+            )
+            metrics = (
+                f"{input_tokens:,.1f} | {output_tokens:,.1f} | {latency_seconds:.2f}"
+            )
+        else:
+            metrics = "— | — | —"
+        lines.append(
+            f"| {MODE_NAMES[mode]} | {sum(attempt.trace_passed for attempt in chosen)}/{len(chosen)} "
+            f"| {len(matched)} | {metrics} |"
+        )
+    lines += [
+        "",
+        "## Per-case checks",
         "",
         f"Each cell is {order}. Outcome judges the returned segments only; trace also requires the reference edges the checks expect.",
         "",

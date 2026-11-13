@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Serve the paired benchmark with Qwen-Agent and the same OneMeld workers."""
+"""Serve the paired benchmark with Qwen-Agent and the same OneMeld workers.
+
+Install the SGLang and test extras and qwen-agent==0.0.34. For the measured
+profile, set the understanding backend's sampling_backend to pytorch, set
+composition.trace to false, and set limits.max_active, limits.max_dispatches
+and limits.timeout_s to 1, 21 and 180.0, respectively. The trace directory
+still records structured per-request traces. Run from the repository root:
+
+    PYTHONPATH=. QWEN_AGENT_MAX_LLM_CALL_PER_RUN=14 python scripts/run_qwen_agent.py \\
+        --config examples/onemeld/profile-sglang-48gb.yaml \\
+        --port 8897 --trace-dir benchmark-trace
+    python scripts/run_cases.py --trace-dir benchmark-trace --output benchmark-results \\
+        --only F1,F2,F3,F4,F6,F7 --repeat 3 --modes plan,agent_rules
+    python scripts/summarize_runs.py benchmark-results
+"""
 
 import argparse
 import asyncio
@@ -38,14 +52,26 @@ from onemeld.server import create_app
 SYSTEM_MESSAGE = (
     "Use the available tools to fulfill the user's request. Call only the tools and the "
     "number of times needed. A tool that generates media returns exactly one item. "
-    "Pass the actual result IDs to tools that use earlier results. Use only IDs listed "
-    "in the input or returned by tools. Set publish to true when the user wants that "
+    "Run each requested operation, including intermediate work. If the user asks for "
+    "text before another operation that uses it, write it with the text tool first. "
+    "Then pass the completed text result ID in input_refs to the tool that uses it, "
+    "even when its instruction already includes some of the same details. Use only IDs "
+    "listed in the input or returned by tools. Set publish to true when the user wants that "
     "result returned. Keep intermediates private when the user only wants later results. "
     "A published result can also be used as a tool input. Use select_results if later "
     "observations change which results should be returned. Preserve the user's subject, "
     "constraints, evaluation criteria and tie-breakers in tool instructions. "
-    "You see only text, so use tools for media and for anything that needs to see an "
-    "image or hear audio. After the requested results are ready, write your final "
+    "You see only text. For any requested work that requires seeing or hearing media, "
+    "call a tool with the actual media IDs in input_refs before answering. When asked "
+    "to compare or choose among results, finish the comparison and state the choice "
+    "and reason. Compare all relevant items together in one tool call when possible, "
+    "or combine the individual tool observations before answering. Use the same "
+    "user-facing labels throughout tool instructions and returned text, such as Image 1 "
+    "and Image 2. When asked to score items, label each item and give each requested "
+    "criterion its own numeric score before stating the recommendation. If the user "
+    "requires one choice and all criteria and specified tie-breakers still tie, choose "
+    "the first item and state that the scores were tied. After the "
+    "requested results are ready, write your final "
     "reply. The service returns the selected tool results and then your final reply, "
     "so write any requested answer that no selected result already holds there, "
     "without repeating the selected results."
@@ -85,7 +111,10 @@ class ToolArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     instruction: str = Field(min_length=1, max_length=2048)
-    input_refs: list[str] = Field(default_factory=list)
+    input_refs: list[str] = Field(
+        default_factory=list,
+        description="IDs of all inputs and completed results this call uses. Include each dependency even if its details are repeated in instruction. Omit or use [] for independent calls.",
+    )
     publish: bool
 
 
@@ -329,6 +358,7 @@ class QwenAgentRun:
         return {
             "id": call.id,
             "kind": artifact.kind,
+            "used_input_refs": call.input_refs,
             **({"text": artifact.value} if isinstance(artifact.value, str) else {}),
             "selected": self.selected,
         }
